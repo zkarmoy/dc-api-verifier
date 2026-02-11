@@ -1,4 +1,3 @@
-<pre>
 # 🪪 EUDI Wallet Playground – DC API Verifier Demo
 
 A lightweight **Digital Credentials API (DC API)** + **OpenID4VP (unsigned)** verifier playground for testing **ISO/IEC 18013-5 mdoc credentials**, including:
