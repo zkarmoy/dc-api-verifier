@@ -1,0 +1,274 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>DC API Verifier Dashboard</title>
+    <link rel="stylesheet" href="style.css" />
+  </head>
+  <body>
+    <div class="app">
+      <header class="header">
+        <div>
+          <h1>DC API Verifier</h1>
+          <p class="subtitle">Local dashboard for OpenID4VP (unsigned) + DCQL (mdoc)</p>
+        </div>
+        <div class="header-actions">
+          <button id="resetBtn" class="btn btn-ghost">Reset</button>
+        </div>
+      </header>
+
+      <main class="grid">
+        <section class="col">
+          <div class="card">
+            <div class="card-header">
+              <h2>Request</h2>
+              <div class="actions">
+                <button id="createRequestBtn" class="btn btn-ghost">Create request</button>
+                <button id="invokeDcApiBtn" class="btn btn-primary">Send to Wallet</button>
+              </div>
+            </div>
+
+            <div class="segmented" role="group" aria-label="Credential type">
+              <label class="seg">
+                <input type="radio" name="cred" value="pid" checked />
+                <span>PID (eu.europa.ec.eudi.pid.1)</span>
+              </label>
+              <label class="seg">
+                <input type="radio" name="cred" value="av" />
+                <span>Age Verification (eu.europa.ec.av.1)</span>
+              </label>
+            </div>
+
+            <div id="pidAttrsSection" class="section">
+              <div class="section-header">
+                <h3>PID Attributes</h3>
+                <div class="actions">
+                  <button id="pidSelectAllBtn" class="btn btn-ghost" type="button">Select all</button>
+                  <button id="pidSelectNoneBtn" class="btn btn-ghost" type="button">Select none</button>
+                </div>
+              </div>
+              <div class="input-row">
+                <input id="pidAddInput" class="input" type="text" placeholder="Add PID attribute (e.g., birth_place)" />
+                <button id="pidAddBtn" class="btn btn-ghost" type="button">+</button>
+              </div>
+              <div id="pidAddHint" class="hint hidden">—</div>
+              <div class="checkbox-grid" role="group" aria-label="PID attribute selector">
+                <label class="check">
+                  <input type="checkbox" data-attr="family_name" checked />
+                  <span>family_name</span>
+                </label>
+                <label class="check">
+                  <input type="checkbox" data-attr="given_name" checked />
+                  <span>given_name</span>
+                </label>
+                <label class="check">
+                  <input type="checkbox" data-attr="birth_date" checked />
+                  <span>birth_date</span>
+                </label>
+                <label class="check">
+                  <input type="checkbox" data-attr="birth_place" />
+                  <span>birth_place</span>
+                </label>
+                <label class="check">
+                  <input type="checkbox" data-attr="issuing_authority" />
+                  <span>issuing_authority</span>
+                </label>
+                <label class="check">
+                  <input type="checkbox" data-attr="issuing_country" />
+                  <span>issuing_country</span>
+                </label>
+                <label class="check">
+                  <input type="checkbox" data-attr="expiry_date" />
+                  <span>expiry_date</span>
+                </label>
+              </div>
+              <div id="pidAttrHint" class="hint">Select at least one attribute to continue.</div>
+            </div>
+
+            <div class="kv-grid">
+              <div class="kv-label">request_id</div>
+              <div class="kv-value">
+                <code id="requestId" class="mono pill">—</code>
+                <button id="copyRequestIdBtn" class="btn btn-icon" title="Copy request_id">⧉</button>
+              </div>
+            </div>
+
+            <details class="details">
+              <summary>Advanced: nonce / state</summary>
+              <div class="kv-grid">
+                <div class="kv-label">nonce</div>
+                <div class="kv-value"><code id="nonce" class="mono">—</code></div>
+                <div class="kv-label">state</div>
+                <div class="kv-value"><code id="state" class="mono">—</code></div>
+              </div>
+            </details>
+
+            <div class="section">
+              <div class="section-header">
+                <h3>Request JSON</h3>
+                <div class="actions">
+                  <button id="applyRequestEditsBtn" class="btn btn-primary" type="button">Apply edits</button>
+                  <button id="resetRequestEditsBtn" class="btn btn-ghost" type="button">Reset to generated</button>
+                  <button id="prettyRequestBtn" class="btn btn-ghost" type="button">Pretty print</button>
+                  <button id="copyRequestJsonBtn" class="btn btn-icon" title="Copy request JSON">⧉</button>
+                </div>
+              </div>
+              <div id="requestJsonError" class="error-banner hidden">—</div>
+              <textarea id="requestJsonEditor" class="textarea editor" rows="10" spellcheck="false">// click "Create request" to generate</textarea>
+            </div>
+          </div>
+
+          <div class="card helper">
+            <div class="helper-header">
+              <div class="helper-icon">⇄</div>
+              <div>
+                <h3>Send to Wallet</h3>
+                <p>Use the Digital Credentials API from a compatible browser to fetch the credential.</p>
+              </div>
+            </div>
+            <div class="helper-steps">
+              <div class="step"><span class="dot"></span>Generate a request</div>
+              <div class="step"><span class="dot"></span>Send to Wallet</div>
+              <div class="step"><span class="dot"></span>Paste or submit response</div>
+            </div>
+          </div>
+        </section>
+
+        <section class="col">
+          <div class="card">
+            <div class="card-header">
+              <h2>Response Input</h2>
+              <div class="actions">
+                <button id="exampleBtn" class="btn btn-ghost">Load example</button>
+                <button id="submitResponseBtn" class="btn btn-primary">Submit response</button>
+              </div>
+            </div>
+
+            <div id="errorBanner" class="error-banner hidden">—</div>
+
+            <label for="dcResponseInput">Paste dcResponse JSON here</label>
+            <textarea id="dcResponseInput" class="textarea" rows="10" placeholder='{"protocol":"openid4vp-v1-unsigned","data":{"vp_token":{"pid1":["..."]}}}'></textarea>
+            <div class="hint">Ctrl+Enter to submit</div>
+
+            <div class="file-row">
+              <label class="file-label" for="fileInput">Upload .json file</label>
+              <input id="fileInput" type="file" accept=".json,application/json" />
+            </div>
+          </div>
+
+          <div class="card">
+            <div class="card-header">
+              <h2>Results</h2>
+              <div id="statusBadge" class="badge badge-neutral">Idle</div>
+            </div>
+
+            <div id="resultsEmpty" class="empty">Submit a response to see results.</div>
+
+            <div id="resultsContent" class="hidden">
+              <div id="identityCard" class="identity-card"></div>
+              <div id="portraitCard" class="portrait-card hidden" aria-live="polite"></div>
+
+              <div class="section">
+                <h3>Requested Attributes</h3>
+                <div id="requestedAttrs" class="kv-grid"></div>
+              </div>
+
+              <details class="details">
+                <summary>Disclosed attributes (debug)</summary>
+                <div class="section">
+                  <div id="claims" class="kv-grid"></div>
+                </div>
+              </details>
+
+              <div class="section">
+                <h3>Verification</h3>
+                <div class="status-tiles">
+                  <div class="tile" title="COSE_Sign1 signature verification using issuer certificate">
+                    <div class="tile-icon">✔</div>
+                    <div>
+                      <div class="tile-title">IssuerAuth</div>
+                      <div class="tile-value" id="issuerSig">—</div>
+                    </div>
+                  </div>
+                  <div class="tile" title="ValueDigest checks against MSO digests">
+                    <div class="tile-icon">⌁</div>
+                    <div>
+                      <div class="tile-title">ValueDigests</div>
+                      <div class="tile-value" id="digests">—</div>
+                    </div>
+                  </div>
+                  <div class="tile" title="DeviceAuth signature depends on session transcript">
+                    <div class="tile-icon">◷</div>
+                    <div>
+                      <div class="tile-title">DeviceAuth</div>
+                      <div class="tile-value" id="deviceSig">—</div>
+                    </div>
+                  </div>
+                </div>
+                <div id="digestFailures" class="failures"></div>
+              </div>
+
+              <div class="card nested">
+                <div class="card-header">
+                  <h3>Certificate</h3>
+                  <div class="actions">
+                    <button id="copySubjectBtn" class="btn btn-icon" title="Copy subject">⧉</button>
+                    <button id="copyIssuerBtn" class="btn btn-icon" title="Copy issuer">⧉</button>
+                  </div>
+                </div>
+                <div id="certSummary" class="kv-grid"></div>
+                <details class="details">
+                  <summary>Raw subject / issuer</summary>
+                  <pre id="certRaw" class="code-block">—</pre>
+                </details>
+              </div>
+
+              <details class="details">
+                <summary>Show raw JSON</summary>
+                <div class="section-header">
+                  <h3>Raw response</h3>
+                  <button id="copyResponseJsonBtn" class="btn btn-icon" title="Copy response JSON">⧉</button>
+                </div>
+                <label class="toggle-row">
+                  <input id="toggleRawFull" type="checkbox" />
+                  <span>Show full JSON (large)</span>
+                </label>
+                <pre id="rawResponse" class="code-block raw-json">—</pre>
+              </details>
+
+              <details class="details">
+                <summary>Debug</summary>
+                <div class="kv-grid">
+                  <div class="kv-label">byteLength</div>
+                  <div class="kv-value"><code id="byteLength" class="mono">—</code></div>
+                  <div class="kv-label">sha256</div>
+                  <div class="kv-value"><code id="sha256" class="mono">—</code></div>
+                  <div class="kv-label">first16</div>
+                  <div class="kv-value"><code id="first16" class="mono">—</code></div>
+                  <div class="kv-label">last16</div>
+                  <div class="kv-value"><code id="last16" class="mono">—</code></div>
+                  <div class="kv-label">topLevelKind</div>
+                  <div class="kv-value"><code id="topLevelKind" class="mono">—</code></div>
+                </div>
+              </details>
+            </div>
+          </div>
+        </section>
+      </main>
+
+      <section class="card log">
+        <div class="card-header">
+          <h2>Console</h2>
+          <div class="actions">
+            <button id="copyLogsBtn" class="btn btn-ghost">Copy logs</button>
+          </div>
+        </div>
+        <div id="log" class="log-body"></div>
+      </section>
+    </div>
+
+    <script src="https://cdn.jsdelivr.net/npm/jpx@0.3.1/jpx.min.js"></script>
+    <script src="app.js"></script>
+  </body>
+</html>
