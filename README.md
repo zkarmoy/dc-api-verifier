@@ -134,7 +134,7 @@ Device signature verification requires the correct SessionTranscript. This demo 
 
 ## Debugging (ISO 18013-7 / Annex C)
 
-The UI console mirrors backend logs. For ISO 18013-7 (DC API / `org-iso-mdoc`), the server emits detailed Annex C debugging output, including:
+The UI console mirrors backend logs. For ISO 18013-7 (DC API / `org-iso-mdoc`), the server emits detailed Annex C debugging output when the debug env vars are enabled, including:
 
 - `enc` (ephemeral public key) hex
 - `cipherText` hex
@@ -149,6 +149,19 @@ The UI console mirrors backend logs. For ISO 18013-7 (DC API / `org-iso-mdoc`), 
   - `baseNonce`
 
 These logs appear in the UI console as `[iso-mdoc][annexC] ...` lines.
+
+**Enable debug logs**
+
+```bash
+# Standard debug (server + UI console)
+DEBUG=1 node server.js
+
+# Enable Annex C / HPKE logs
+DEBUG=1 DEBUG_ANNEXC=1 node server.js
+
+# Include intermediate secrets (sharedSecret, aeadKey, baseNonce) if available
+DEBUG=1 DEBUG_ANNEXC=1 DEBUG_ANNEXC_SECRETS=1 node server.js
+```
 
 Note: Some HPKE internals may not be exposed by the library. In those cases, the server logs indicate the value is unavailable.
 
