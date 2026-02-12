@@ -1,98 +1,75 @@
-# 🪪 EUDI Wallet Playground – DC API Verifier Demo
+# DC API Verifier Playground
 
-A lightweight **Digital Credentials API (DC API)** + **OpenID4VP (unsigned)** verifier playground for testing **ISO/IEC 18013-5 mdoc credentials**, including:
+A lightweight playground for Digital Credentials API + OpenID4VP (unsigned) and ISO 18013-7 over DC API. It focuses on ISO/IEC 18013-5 mdoc parsing and extraction for testing wallets and requests.
 
-- 🇪🇺 PID — `eu.europa.ec.eudi.pid.1`
-- 🔞 Age Verification — `eu.europa.ec.av.1`
+This is a demo and not production-ready.
 
-This project is designed for experimentation, interoperability testing, and understanding how mdoc-based credentials work in a web verifier context.
+**Supported Protocols**
+1. OpenID4VP (unsigned) over DC API (`response_mode=dc_api.jwt`)
+2. ISO 18013-7 DeviceRequest over DC API (`protocol=org-iso-mdoc`)
 
-> ⚠️ This is a demo / playground. It is **not production-ready** and does not implement full security hardening.
+**Supported Credentials (mdoc)**
+1. PID `eu.europa.ec.eudi.pid.1`
+2. Age Verification `eu.europa.ec.av.1`
+3. Custom mdoc doctypes via issuer metadata import (mso_mdoc only)
 
----
+## Features
 
-## ✨ Features
-
-### 🔐 OpenID4VP (Unsigned) via DC API
+**OpenID4VP (Unsigned) via DC API**
 - Generates dynamic DCQL requests
 - Supports live wallet interaction
 - Editable request JSON before sending
 
-### 🪪 PID Support (`eu.europa.ec.eudi.pid.1`)
-- Attribute selector (checkboxes)
-- Manual attribute addition via text input
-- Displays:
-  - Given name / family name
-  - Birth date (ISO-safe formatting, no timezone shift)
-  - Birth place
-  - Issuing country / authority
-  - Expiry date
-- Strict filtering: only requested attributes are displayed
-
-### 🔞 Age Verification Support (`eu.europa.ec.av.1`)
-Displays:
-- `age_over_18`
-- `age_over_21`
-- `issuing_country`
-- `expiry_date`
-
-### 🌐 ISO 18013-7 (DeviceRequest over DC API)
-- Alternate presentation format selectable in the UI
+**ISO 18013-7 (DeviceRequest over DC API)**
 - Generates an ISO 18013-5 DeviceRequest (CBOR, base64url)
 - Invokes the wallet through DC API with `protocol: "org-iso-mdoc"`
 
-### 🏛 Certificate Viewer
-Displays issuer certificate details:
-- Subject (CN, O, OU, C)
-- Issuer
-- Validity period
-- Public key information
-- Raw subject / issuer (collapsible)
+**Credential Attribute Selection**
+- PID and AV attribute selectors
+- Custom mdoc claim sets imported from issuer metadata
 
-### 🧪 Developer Tools
-- Raw JSON viewer (sanitized to avoid large binary overflow)
-- Scrollable debug area
+**Verification and Display**
+- Parses DeviceResponse and IssuerSigned items
+- Verifies IssuerAuth signature
+- Verifies valueDigests (when present)
+- Displays extracted attributes and issuer certificate
+
+**Developer Tools**
+- Raw JSON viewer (sanitized)
 - Editable request JSON
-- Manual attribute injection
-- Strict CBOR + valueDigest verification
+- CBOR debug section
+- Server logs streamed into UI console
 
----
-
-## 🏗 Architecture
+## Architecture
 
 ```
 Browser (UI)
-   ↓
-Node.js Express Backend
-   ↓
-Wallet (DC API / OpenID4VP)
+  -> Node.js Express Backend
+  -> Wallet (DC API / OpenID4VP)
 ```
 
-### Backend
+**Backend**
 - Express server
 - CBOR parsing
 - ISO 18013-5 mdoc parsing
 - IssuerAuth verification
 - valueDigest verification
-- DeviceAuth parsing (verification requires transcript)
+- DeviceAuth parsing (full verification requires SessionTranscript)
 
-### Frontend
+**Frontend**
 - Static HTML / CSS / JS
-- No framework
-- Clean identity-card rendering
-- Dynamic DCQL builder
+- DCQL request builder
+- Step-based flow UI
 
----
+## Getting Started
 
-## 🚀 Getting Started
-
-### 1️⃣ Install dependencies
+1. Install dependencies
 
 ```bash
 npm install
 ```
 
-### 2️⃣ Start the server
+2. Start the server
 
 ```bash
 node server.js
@@ -104,46 +81,41 @@ Open:
 http://localhost:3000
 ```
 
-> Some Digital Credential APIs require a secure context (`https`).  
-> If needed, run behind a local HTTPS proxy.
+Some Digital Credential APIs require a secure context (https). Run behind a local HTTPS proxy if needed.
 
----
+## Using the App
 
-## 🧭 How It Works
+**Step 1: Build Request**
+- Pick protocol: OpenID4VP or ISO 18013-7
+- Pick credential type and attributes
+- Optional: paste issuer metadata to load supported mdoc credentials
 
-### 1️⃣ Create Request
-- Choose credential type (PID or AV)
-- Select attributes (PID)
-- Optionally edit JSON manually
-- Click “Send to Wallet”
+**Step 2: Send Request**
+- Use "Send to Wallet" to invoke the Digital Credentials API
 
-### ISO 18013-7 (DeviceRequest via DC API)
-1. Switch to **Age Verification**
-2. Select **Presentation format → ISO 18013-7**
-3. Click **Create request**
-4. Use **Send to Wallet**
-5. Paste the response and submit
+**Step 3: Receive Response**
+- Paste or upload the wallet response JSON
 
-### 2️⃣ Wallet Interaction
-- Wallet displays requested attributes
-- User consents
-- Credential is returned via DC API
+**Step 4: Verify**
+- IssuerAuth and valueDigest verification are shown
 
-### 3️⃣ Verification & Display
-The backend:
+**Step 5: Attributes**
+- Extracted attributes and portrait are displayed
 
-- Parses DeviceResponse
-- Extracts IssuerSigned items
-- Verifies:
-  - IssuerAuth signature
-  - ValueDigests
-- Displays structured credential view
+## Testing With Issuer Metadata
 
----
+1. Paste issuer metadata JSON in the Supported Credentials section.
+2. Click **Import metadata**.
+3. Select a credential card and click **Use for request**.
+4. Create a request to get a fresh `request_id`, then send to wallet.
 
-## 🔍 ISO 18013-5 Notes
+Notes:
+- Only `mso_mdoc` credential configurations are imported.
+- Non‑PID/AV doctypes are applied directly to the request JSON.
 
-### Value Digests
+## ISO 18013-5 Notes
+
+**Value Digests**
 Each disclosed attribute is verified against:
 
 ```
@@ -156,13 +128,10 @@ Digest is computed over:
 IssuerSignedItemBytes = Tag(24, embedded CBOR)
 ```
 
-### DeviceAuth
-Device signature verification requires the correct SessionTranscript.  
-This demo parses DeviceAuth but does not fully verify it unless transcript bytes are provided.
+**DeviceAuth**
+Device signature verification requires the correct SessionTranscript. This demo parses DeviceAuth but does not fully verify it unless transcript bytes are provided.
 
----
-
-## 📁 Project Structure
+## Project Structure
 
 ```
 .
@@ -175,77 +144,19 @@ This demo parses DeviceAuth but does not fully verify it unless transcript bytes
 └── README.md
 ```
 
----
+## Customization
 
-## ⚙️ Customization
+**Add PID Attributes**
+- Type attribute name and click +
+- Apply edits to request JSON if needed
 
-### Add a New Attribute
-In PID view:
-- Type attribute name
-- Click ➕
-- It is automatically added to DCQL
+**Edit Request JSON**
+- Modify the JSON in the editor
+- Click "Apply edits"
 
-### Edit Request JSON
-- Modify request directly in the editor
-- Click “Apply edits”
-- Launch wallet with modified request
+## Known Limitations
 
----
-
-## 🧪 Known Limitations
-
-- No production-grade security
-- DeviceAuth full verification requires transcript
+- No production-grade security hardening
+- DeviceAuth full verification requires SessionTranscript
 - No certificate trust chain validation
-- No HTTPS enforcement built-in
-- Designed for experimentation and interoperability
-
----
-
-## ✅ Testing Notes
-
-### OID4VP (DC API)
-- Requires a browser with Digital Credentials API support
-- Some setups need HTTPS (use a local HTTPS proxy if required)
-- Chrome: enable `chrome://flags/#enable-digital-credentials` (if needed)
-
-### ISO 18013-7
-- Uses the same UI but different request/response endpoints
-- Requires Digital Credentials API support
-- Wallet support varies; expect differences across vendors
-
----
-
-## 📚 References
-
-- ISO/IEC 18013-5: Mobile Driving Licence (mdoc)
-- OpenID4VP Draft
-- EUDI Wallet Architecture & ARF
-- Digital Credentials API (W3C)
-
----
-
-## 🤝 Contributing
-
-This project is a technical playground for experimentation.  
-Pull requests and improvements are welcome.
-
----
-
-## 📄 License
-
-MIT License
-
-Copyright 2026 - @me
-
-Permission is hereby granted, free of charge, to any person obtaining a copy of this software and associated documentation files (the “Software”), to deal in the Software without restriction, including without limitation the rights to use, copy, modify, merge, publish, distribute, sublicense, and/or sell copies of the Software, and to permit persons to whom the Software is furnished to do so, subject to the following conditions:
-
-The above copyright notice and this permission notice shall be included in all copies or substantial portions of the Software.
-
-THE SOFTWARE IS PROVIDED “AS IS”, WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
-
----
-
-## 👤 Author
-
-Built for experimentation with EUDI Wallet and DC API flows.
+- HTTPS not enforced by default
