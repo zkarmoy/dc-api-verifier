@@ -5,8 +5,43 @@ const state = {
   lastResponse: null,
   generatedRequest: null,
   editedRequest: null,
-  requestedIdentifiers: []
+  requestedIdentifiers: [],
+  protocol: "oid4vp",
+  stepStates: {},
+  issuerMetadata: null,
+  supportedCredentials: []
 };
+
+const STEP_LABELS = {
+  pending: "Pending",
+  active: "Active",
+  success: "Success",
+  error: "Error"
+};
+
+function setStepState(step, status) {
+  state.stepStates[step] = status;
+  const stepEl = document.querySelector(`.step[data-step="${step}"]`);
+  if (stepEl) {
+    stepEl.classList.remove("pending", "active", "success", "error");
+    stepEl.classList.add(status);
+    const badge = stepEl.querySelector(".step-status");
+    if (badge) badge.textContent = STEP_LABELS[status] || status;
+  }
+  const stepperEl = document.querySelector(`.stepper-item[data-step="${step}"]`);
+  if (stepperEl) {
+    stepperEl.classList.remove("pending", "active", "success", "error");
+    stepperEl.classList.add(status);
+  }
+}
+
+function resetStepStates() {
+  setStepState(1, "active");
+  setStepState(2, "pending");
+  setStepState(3, "pending");
+  setStepState(4, "pending");
+  setStepState(5, "pending");
+}
 
 function setStatus(type, message) {
   const badge = $("statusBadge");
@@ -24,6 +59,29 @@ function addLog(level, msg) {
   log.scrollTop = log.scrollHeight;
 }
 
+function connectServerLogs() {
+  if (!window.EventSource) {
+    addLog("warn", "Server log stream not supported in this browser.");
+    return;
+  }
+  const es = new EventSource("/logs/stream");
+  es.onmessage = (ev) => {
+    try {
+      const entry = JSON.parse(ev.data);
+      const level = entry.level === "error" ? "error" : entry.level === "warn" ? "warn" : "info";
+      addLog(level, `SERVER: ${entry.msg}`);
+    } catch {
+      // ignore
+    }
+  };
+  es.onerror = () => {
+    if (!state.serverLogError) {
+      state.serverLogError = true;
+      addLog("warn", "Server log stream disconnected.");
+    }
+  };
+}
+
 async function copyToClipboard(text) {
   try {
     await navigator.clipboard.writeText(text);
@@ -35,15 +93,86 @@ async function copyToClipboard(text) {
 
 function renderRequest(data) {
   state.request = data;
-  state.generatedRequest = data.request;
+  const requestObj = data.request ? {
+    sessionId: data.sessionId,
+    request_id: data.request_id,
+    request: data.request
+  } : (data.data ? {
+    request: {
+      protocol: "org-iso-mdoc",
+      data: data.data
+    }
+  } : (data.deviceRequest ? {
+    request: {
+      protocol: "org-iso-mdoc",
+      data: {
+        deviceRequest: data.deviceRequest,
+        encryptionInfo: data.encryptionInfo
+      }
+    }
+  } : data));
+  state.generatedRequest = requestObj;
   state.editedRequest = null;
   $("requestId").textContent = data.request_id || "—";
   $("nonce").textContent = data.state_hint?.nonce || "—";
   $("state").textContent = data.state_hint?.state || "—";
-  setRequestEditor(JSON.stringify(data.request, null, 2));
+  setRequestEditor(JSON.stringify(requestObj, null, 2));
   setRequestError("");
   updateRequestedIdentifiers();
-  syncPidCheckboxesFromRequest(data.request);
+  syncPidCheckboxesFromRequest(requestObj);
+  syncAvCheckboxesFromRequest(requestObj);
+  updateProtocolUI();
+  setStepState(1, "success");
+  setStepState(2, "active");
+  setStepState(3, "pending");
+  setStepState(4, "pending");
+  setStepState(5, "pending");
+}
+
+function getProtocolFromUrl() {
+  const params = new URLSearchParams(window.location.search);
+  return params.get("protocol");
+}
+
+function setProtocolInUrl(protocol) {
+  const params = new URLSearchParams(window.location.search);
+  params.set("protocol", protocol);
+  const newUrl = `${window.location.pathname}?${params.toString()}`;
+  window.history.replaceState({}, "", newUrl);
+}
+
+function loadProtocol() {
+  const fromUrl = getProtocolFromUrl();
+  if (fromUrl) return fromUrl === "iso18013-7" ? "iso-mdoc" : fromUrl;
+  return "oid4vp";
+}
+
+function saveProtocol(protocol) {
+  localStorage.setItem("avProtocol", protocol);
+  setProtocolInUrl(protocol);
+}
+
+function setProtocolSelection(protocol) {
+  const input = document.querySelector(`input[name=protocol][value="${protocol}"]`);
+  if (input) input.checked = true;
+  state.protocol = protocol;
+}
+
+function getSelectedProtocol() {
+  const input = document.querySelector("input[name=protocol]:checked");
+  return input ? input.value : state.protocol || "oid4vp";
+}
+
+function updateProtocolUI() {
+  const selected = getSelectedProtocol();
+  setProtocolSelection(selected);
+
+  const help = $("protocolHelp");
+  if (help) {
+    help.textContent = selected === "iso-mdoc"
+      ? "ISO 18013-5 DeviceRequest (org-iso-mdoc) over Digital Credentials API"
+      : "OpenID4VP request over Digital Credentials API";
+  }
 }
 
 function setRequestError(msg) {
@@ -79,22 +208,334 @@ function getActiveRequest() {
 }
 
 function getRequestedIdentifiersFromRequest(requestObj, docType) {
-  if (!requestObj?.dcql_query?.credentials?.length) return [];
-  const creds = requestObj.dcql_query.credentials;
-  let cred = creds[0];
-  if (docType) {
-    const match = creds.find((c) => c?.meta?.doctype_value === docType);
-    if (match) cred = match;
+  if (requestObj?.request?.data?.deviceRequest) {
+    return [];
   }
-  const claims = Array.isArray(cred?.claims) ? cred.claims : [];
-  return claims
-    .map((c) => Array.isArray(c?.path) ? c.path[1] : null)
-    .filter((v) => typeof v === "string" && v.length > 0);
+  if (requestObj?.dcql_query?.credentials?.length) {
+    const creds = requestObj.dcql_query.credentials;
+    let cred = creds[0];
+    if (docType) {
+      const match = creds.find((c) => c?.meta?.doctype_value === docType);
+      if (match) cred = match;
+    }
+    const claims = Array.isArray(cred?.claims) ? cred.claims : [];
+    return claims
+      .map((c) => Array.isArray(c?.path) ? c.path[1] : null)
+      .filter((v) => typeof v === "string" && v.length > 0);
+  }
+  if (requestObj?.deviceRequest?.docRequests?.length) {
+    const docs = requestObj.deviceRequest.docRequests;
+    let doc = docs[0];
+    if (docType) {
+      const match = docs.find((d) => d?.docType === docType);
+      if (match) doc = match;
+    }
+    const ns = doc?.itemsRequest || {};
+    const nsKey = docType || doc?.docType;
+    const items = nsKey ? ns[nsKey] : null;
+    return items ? Object.keys(items) : [];
+  }
+  if (Array.isArray(requestObj?.requested_attributes)) {
+    return requestObj.requested_attributes.filter((v) => typeof v === "string");
+  }
+  if (Array.isArray(requestObj?.presentation_definition?.claims)) {
+    return requestObj.presentation_definition.claims.filter((v) => typeof v === "string");
+  }
+  return [];
 }
 
 function updateRequestedIdentifiers(docType) {
   const req = getActiveRequest();
   state.requestedIdentifiers = getRequestedIdentifiersFromRequest(req, docType);
+}
+
+function hasCustomEditedRequest() {
+  const req = state.editedRequest;
+  const cred = req?.request?.data?.dcql_query?.credentials?.[0];
+  const docType = cred?.meta?.doctype_value;
+  return !!(docType && docType !== "eu.europa.ec.eudi.pid.1" && docType !== "eu.europa.ec.av.1");
+}
+
+function setIssuerMetaError(msg) {
+  const el = $("issuerMetaError");
+  if (!el) return;
+  if (!msg) {
+    el.classList.add("hidden");
+    el.textContent = "—";
+  } else {
+    el.textContent = msg;
+    el.classList.remove("hidden");
+  }
+}
+
+function pickDisplayName(display, fallback) {
+  if (Array.isArray(display)) {
+    const en = display.find((d) => d?.locale === "en");
+    if (en?.name) return en.name;
+    if (display[0]?.name) return display[0].name;
+  }
+  return fallback;
+}
+
+function extractCredentialConfigs(meta) {
+  const configs = meta?.credential_configurations_supported || {};
+  return Object.entries(configs).map(([key, cfg]) => {
+    const display = cfg?.credential_metadata?.display || cfg?.display;
+    const displayName = pickDisplayName(display, key);
+    const claims = Array.isArray(cfg?.credential_metadata?.claims)
+      ? cfg.credential_metadata.claims
+      : [];
+    const claimPaths = claims
+      .map((c) => (Array.isArray(c?.path) ? c.path : null))
+      .filter(Boolean);
+    const doctype = cfg?.doctype || null;
+    const vct = cfg?.vct || null;
+    const namespace = doctype || (claimPaths[0]?.[0] || null);
+    const attrs = claimPaths
+      .map((p) => (p.length > 0 ? p[p.length - 1] : null))
+      .filter((v) => typeof v === "string");
+    const mandatoryCount = claims.filter((c) => c?.mandatory).length;
+    return {
+      id: key,
+      format: cfg?.format || "unknown",
+      scope: cfg?.scope || "",
+      doctype,
+      vct,
+      namespace,
+      displayName,
+      claims,
+      attrs,
+      mandatoryCount
+    };
+  });
+}
+
+function renderIssuerSummary(meta) {
+  const el = $("issuerSummary");
+  if (!el) return;
+  if (!meta) {
+    el.classList.add("hidden");
+    el.innerHTML = "";
+    return;
+  }
+  const displayName = pickDisplayName(meta.display, meta.credential_issuer || "Issuer");
+  const issuer = meta.credential_issuer || "—";
+  const authServers = Array.isArray(meta.authorization_servers) ? meta.authorization_servers.length : 0;
+  const credEndpoint = meta.credential_endpoint || "—";
+  el.innerHTML = `
+    <h4>${displayName}</h4>
+    <div class="kv-grid">
+      <div class="kv-label">issuer</div>
+      <div class="kv-value"><code class="mono">${issuer}</code></div>
+      <div class="kv-label">auth servers</div>
+      <div class="kv-value">${authServers}</div>
+      <div class="kv-label">endpoint</div>
+      <div class="kv-value"><code class="mono">${credEndpoint}</code></div>
+    </div>
+  `;
+  el.classList.remove("hidden");
+}
+
+function renderCredentialCatalog(list) {
+  const container = $("credentialCatalog");
+  if (!container) return;
+  container.innerHTML = "";
+  if (!list || list.length === 0) {
+    container.classList.add("empty");
+    container.textContent = "No supported credentials found in the metadata.";
+    return;
+  }
+  container.classList.remove("empty");
+
+  list.forEach((cred) => {
+    const card = document.createElement("div");
+    card.className = "credential-card";
+
+    const name = document.createElement("div");
+    name.className = "credential-name";
+    name.textContent = cred.displayName;
+
+    const tags = document.createElement("div");
+    tags.className = "credential-tags";
+    const formatTag = document.createElement("span");
+    formatTag.className = "tag";
+    formatTag.textContent = cred.format;
+    tags.appendChild(formatTag);
+    if (cred.doctype) {
+      const d = document.createElement("span");
+      d.className = "tag";
+      d.textContent = cred.doctype;
+      tags.appendChild(d);
+    } else if (cred.vct) {
+      const v = document.createElement("span");
+      v.className = "tag";
+      v.textContent = cred.vct;
+      tags.appendChild(v);
+    }
+
+    const header = document.createElement("div");
+    header.className = "credential-card-header";
+    header.appendChild(name);
+    header.appendChild(tags);
+
+    const meta = document.createElement("div");
+    meta.className = "credential-meta";
+    const metaRows = [
+      ["scope", cred.scope || "—"],
+      ["claims", `${cred.attrs.length} (${cred.mandatoryCount} mandatory)`],
+      ["namespace", cred.namespace || "—"]
+    ];
+    metaRows.forEach(([label, value]) => {
+      const l = document.createElement("div");
+      l.textContent = label;
+      const v = document.createElement("div");
+      v.textContent = value;
+      meta.appendChild(l);
+      meta.appendChild(v);
+    });
+
+    const claims = document.createElement("div");
+    claims.className = "credential-claims";
+    const preview = cred.attrs.slice(0, 6);
+    preview.forEach((attr) => {
+      const chip = document.createElement("span");
+      chip.className = "chip";
+      chip.textContent = attr;
+      claims.appendChild(chip);
+    });
+    if (cred.attrs.length > preview.length) {
+      const more = document.createElement("span");
+      more.className = "chip";
+      more.textContent = `+${cred.attrs.length - preview.length} more`;
+      claims.appendChild(more);
+    }
+
+    const actions = document.createElement("div");
+    actions.className = "credential-actions";
+    const copyBtn = document.createElement("button");
+    copyBtn.className = "btn btn-ghost";
+    copyBtn.type = "button";
+    copyBtn.textContent = "Copy claims";
+    copyBtn.addEventListener("click", () => {
+      copyToClipboard(JSON.stringify(cred.claims, null, 2));
+    });
+
+    const useBtn = document.createElement("button");
+    useBtn.className = "btn btn-primary";
+    useBtn.type = "button";
+    useBtn.textContent = "Use for request";
+    useBtn.disabled = cred.format !== "mso_mdoc" || !cred.namespace;
+    useBtn.addEventListener("click", () => applyCredentialToRequest(cred));
+    actions.appendChild(copyBtn);
+    actions.appendChild(useBtn);
+
+    card.appendChild(header);
+    card.appendChild(meta);
+    card.appendChild(claims);
+    card.appendChild(actions);
+    container.appendChild(card);
+  });
+}
+
+function applyCredentialToRequest(cred) {
+  if (!cred || cred.format !== "mso_mdoc" || !cred.namespace) {
+    setIssuerMetaError("This credential format is not supported by the current request builder.");
+    return;
+  }
+  setIssuerMetaError("");
+  const attrs = cred.attrs.length ? cred.attrs : [];
+  const baseReq = getActiveRequest() || state.generatedRequest;
+  if (!baseReq) {
+    setIssuerMetaError("Create a request first so the server can generate keys, then apply this credential.");
+    return;
+  }
+
+  const req = JSON.parse(JSON.stringify(baseReq));
+  const target = req.request?.data?.dcql_query || req.dcql_query;
+  if (!target) {
+    setIssuerMetaError("Request JSON missing dcql_query. Create a new request first.");
+    return;
+  }
+  if (!Array.isArray(target.credentials)) target.credentials = [];
+  const credId = cred.id || "cred1";
+  const newCred = {
+    id: credId,
+    format: "mso_mdoc",
+    meta: { doctype_value: cred.doctype || cred.namespace },
+    claims: cred.claims?.length
+      ? cred.claims.map((c) => ({ path: c.path }))
+      : attrs.map((a) => ({ path: [cred.namespace, a] }))
+  };
+  target.credentials = [newCred];
+  target.credential_sets = [
+    {
+      options: [[credId]],
+      purpose: "Custom credential"
+    }
+  ];
+
+  state.editedRequest = req;
+  setRequestEditor(JSON.stringify(req, null, 2));
+  updateRequestedIdentifiers(cred.doctype || cred.namespace);
+
+  if (cred.doctype === "eu.europa.ec.eudi.pid.1") {
+    const pidRadio = document.querySelector('input[name="cred"][value="pid"]');
+    if (pidRadio) pidRadio.checked = true;
+    setPidAttrChecks(false);
+    attrs.forEach((a) => {
+      const box = ensurePidCheckbox(a);
+      if (box) box.checked = true;
+    });
+    updatePidAttrUI();
+    addLog("info", "Applied PID attributes from metadata");
+    return;
+  }
+
+  if (cred.doctype === "eu.europa.ec.av.1") {
+    const avRadio = document.querySelector('input[name="cred"][value="av"]');
+    if (avRadio) avRadio.checked = true;
+    setAvAttrChecks(false);
+    attrs.forEach((a) => {
+      const box = document.querySelector(`#avAttrsSection input[data-av-attr="${a}"]`);
+      if (box) box.checked = true;
+    });
+    updatePidAttrUI();
+    addLog("info", "Applied AV attributes from metadata");
+    return;
+  }
+
+  addLog("info", `Applied ${cred.displayName} (${cred.doctype || cred.namespace}) to request JSON`);
+}
+
+function importIssuerMetadata() {
+  try {
+    const raw = $("issuerMetadataInput")?.value?.trim();
+    if (!raw) throw new Error("Paste issuer metadata JSON to import.");
+    const meta = JSON.parse(raw);
+    state.issuerMetadata = meta;
+    const allCredentials = extractCredentialConfigs(meta);
+    const mdocCredentials = allCredentials.filter((c) => c.format === "mso_mdoc");
+    state.supportedCredentials = mdocCredentials;
+    renderIssuerSummary(meta);
+    renderCredentialCatalog(state.supportedCredentials);
+    setIssuerMetaError("");
+    if (mdocCredentials.length === 0) {
+      setIssuerMetaError("No mso_mdoc credentials found. This UI only imports mdoc credentials.");
+    }
+    addLog("info", `Imported ${mdocCredentials.length} mso_mdoc credential configurations`);
+  } catch (e) {
+    setIssuerMetaError(`Invalid metadata JSON: ${e.message}`);
+  }
+}
+
+function clearIssuerMetadata() {
+  state.issuerMetadata = null;
+  state.supportedCredentials = [];
+  const input = $("issuerMetadataInput");
+  if (input) input.value = "";
+  renderIssuerSummary(null);
+  renderCredentialCatalog([]);
+  setIssuerMetaError("");
 }
 
 function setPidAddHint(msg) {
@@ -137,6 +578,13 @@ function syncPidCheckboxesFromRequest(requestObj) {
     const box = ensurePidCheckbox(id);
     if (box) box.checked = true;
   });
+}
+
+function syncAvCheckboxesFromRequest(requestObj) {
+  if (!requestObj) return;
+  const ids = getRequestedIdentifiersFromRequest(requestObj, "eu.europa.ec.av.1");
+  const boxes = Array.from(document.querySelectorAll("#avAttrsSection input[type=checkbox][data-av-attr]"));
+  boxes.forEach((b) => { b.checked = ids.includes(b.dataset.avAttr); });
 }
 
 function addPidAttributeFromInput() {
@@ -192,6 +640,7 @@ function applyRequestEdits() {
     setRequestError("");
     updateRequestedIdentifiers();
     syncPidCheckboxesFromRequest(parsed);
+    syncAvCheckboxesFromRequest(parsed);
     addLog("info", "Applied request edits");
   } catch (e) {
     setRequestError(`Invalid JSON: ${e.message}`);
@@ -206,6 +655,7 @@ function resetRequestEdits() {
   setRequestError("");
   updateRequestedIdentifiers();
   syncPidCheckboxesFromRequest(state.generatedRequest);
+  syncAvCheckboxesFromRequest(state.generatedRequest);
   addLog("info", "Request JSON reset");
 }
 
@@ -215,6 +665,7 @@ function prettyPrintRequest() {
     setRequestEditor(JSON.stringify(parsed, null, 2));
     setRequestError("");
     syncPidCheckboxesFromRequest(parsed);
+    syncAvCheckboxesFromRequest(parsed);
   } catch (e) {
     setRequestError(`Invalid JSON: ${e.message}`);
   }
@@ -233,6 +684,20 @@ function parseTextareaJson() {
 
 async function postResponse(requestId, dcResponse) {
   const res = await fetch("/verifier/oid4vp/response", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ request_id: requestId, dcResponse })
+  });
+  const data = await res.json();
+  if (!res.ok) {
+    const message = data?.error || "Request failed";
+    throw new Error(message);
+  }
+  return data;
+}
+
+async function postIsoResponse(requestId, dcResponse) {
+  const res = await fetch("/verifier/iso-mdoc/response", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ request_id: requestId, dcResponse })
@@ -515,21 +980,26 @@ function renderIdentityCardAV(extracted, claimsById) {
 function renderResults(data) {
   state.lastResponse = data;
   $("resultsEmpty").classList.add("hidden");
-  $("resultsContent").classList.remove("hidden");
+  $("verifyContent").classList.remove("hidden");
+  const step5 = document.querySelector('.step[data-step="5"]');
+  if (step5) step5.classList.remove("hidden");
   $("errorBanner").classList.add("hidden");
 
   setStatus(data.ok ? "ok" : "bad", data.ok ? "OK" : "FAIL");
+  setStepState(4, data.ok ? "success" : "error");
+  if (data.ok) setStepState(5, "success");
 
   const extracted = data.extracted || {};
   const docKey = getDocKey(extracted.docType);
   const allClaims = extracted.disclosedAttributes || [];
   updateRequestedIdentifiers(extracted.docType);
   const requestedIds = state.requestedIdentifiers || [];
+  const effectiveRequested = requestedIds.length ? requestedIds : (extracted.requestedAttrs || []);
   const namespacedClaims = docKey
     ? allClaims.filter((c) => c.namespace === extracted.docType)
     : allClaims;
-  const filteredClaims = requestedIds.length
-    ? namespacedClaims.filter((c) => requestedIds.includes(c.elementIdentifier))
+  const filteredClaims = effectiveRequested.length
+    ? namespacedClaims.filter((c) => effectiveRequested.includes(c.elementIdentifier))
     : namespacedClaims;
 
   const claimsById = filteredClaims.reduce((acc, c) => {
@@ -595,10 +1065,10 @@ function renderResults(data) {
   const requestedEl = $("requestedAttrs");
   if (requestedEl) {
     requestedEl.innerHTML = "";
-  let requested = requestedIds.length ? requestedIds.slice() : (extracted.requestedAttrs || []);
-  if (!requested.length && isAv) {
-    requested = ["age_over_18", "age_over_21", "issuing_country", "expiry_date"];
-  }
+    let requested = requestedIds.length ? requestedIds.slice() : (extracted.requestedAttrs || []);
+    if (!requested.length && isAv) {
+      requested = ["age_over_18", "age_over_21", "issuing_country", "expiry_date"];
+    }
     if (docKey === "pid") {
       requested = requested.filter((a) => FIELD_MAP.pid[a]);
     }
@@ -653,16 +1123,27 @@ function renderResults(data) {
   $("issuerSig").textContent = issuerBadge.text;
   $("issuerSig").className = issuerBadge.text === "PASS" ? "tile-value badge-ok" : issuerBadge.text === "FAIL" ? "tile-value badge-bad" : "tile-value badge-neutral";
 
-  $("digests").textContent = digestsBadge.text;
-  $("digests").className = digestsBadge.text === "PASS" ? "tile-value badge-ok" : digestsBadge.text === "FAIL" ? "tile-value badge-bad" : "tile-value badge-neutral";
+  const digestReason = verification.valueDigestsValid?.reason;
+  if (digestsVal === null) {
+    $("digests").textContent = "N/A";
+    $("digests").className = "tile-value badge-neutral";
+  } else {
+    $("digests").textContent = digestsBadge.text;
+    $("digests").className = digestsBadge.text === "PASS" ? "tile-value badge-ok" : digestsBadge.text === "FAIL" ? "tile-value badge-bad" : "tile-value badge-neutral";
+  }
 
   const deviceReason = verification.deviceSignatureValid?.reason || "NOT VERIFIED";
-  $("deviceSig").textContent = deviceReason.includes("NOT VERIFIED") ? "NOT CHECKED" : "—";
-  $("deviceSig").className = "tile-value badge-warn";
+  const deviceOk = verification.deviceSignatureValid?.ok;
+  $("deviceSig").textContent = deviceOk === true ? "PASS" : deviceOk === false ? "FAIL" : "NOT CHECKED";
+  $("deviceSig").className = deviceOk === true ? "tile-value badge-ok" : deviceOk === false ? "tile-value badge-bad" : "tile-value badge-warn";
 
   const perItem = verification.valueDigestsValid?.perItem || [];
   const failures = perItem.filter((i) => i.ok === false).map((i) => i.elementIdentifier).join(", ");
   $("digestFailures").textContent = failures ? `Failing fields: ${failures}` : "";
+  const notes = [];
+  if (digestsVal === null && digestReason) notes.push(`ValueDigests: ${digestReason}`);
+  if (deviceOk === null && deviceReason) notes.push(`DeviceAuth: ${deviceReason}`);
+  $("verificationNotes").textContent = notes.join(" • ");
 
   // Certificate
   const cert = extracted.issuerCertificate || {};
@@ -705,9 +1186,37 @@ function getSelectedCred() {
   return input ? input.value : "pid";
 }
 
+function mapIsoErrorMessage(err) {
+  const msg = String(err?.message || "").toLowerCase();
+  const name = String(err?.name || "");
+  if (
+    name === "NotFoundError" ||
+    name === "NotAllowedError" ||
+    name === "NotSupportedError" ||
+    msg.includes("not supported") ||
+    msg.includes("unsupported") ||
+    msg.includes("not found") ||
+    msg.includes("no credential") ||
+    msg.includes("no response") ||
+    msg.includes("cancelled") ||
+    msg.includes("canceled")
+  ) {
+    if (msg.includes("not supported") || msg.includes("unsupported") || name === "NotSupportedError") {
+      return "This wallet does not support ISO 18013-7 presentation for this credential. Try OpenID4VP instead.";
+    }
+    return "No compatible ISO 18013-7 credential found in the wallet for this request. Switch to OpenID4VP (DC API) or install/import the required credential.";
+  }
+  return null;
+}
+
 function getSelectedPidAttrs() {
   const boxes = Array.from(document.querySelectorAll("#pidAttrsSection input[type=checkbox][data-attr]"));
   return boxes.filter((b) => b.checked).map((b) => b.dataset.attr);
+}
+
+function getSelectedAvAttrs() {
+  const boxes = Array.from(document.querySelectorAll("#avAttrsSection input[type=checkbox][data-av-attr]"));
+  return boxes.filter((b) => b.checked).map((b) => b.dataset.avAttr);
 }
 
 function setPidAttrChecks(checked) {
@@ -715,32 +1224,101 @@ function setPidAttrChecks(checked) {
   boxes.forEach((b) => { b.checked = checked; });
 }
 
+function setAvAttrChecks(checked) {
+  const boxes = Array.from(document.querySelectorAll("#avAttrsSection input[type=checkbox][data-av-attr]"));
+  boxes.forEach((b) => { b.checked = checked; });
+}
+
 function updatePidAttrUI() {
-  const isPid = getSelectedCred() === "pid";
-  const section = $("pidAttrsSection");
-  if (section) section.classList.toggle("hidden", !isPid);
-  const selected = isPid ? getSelectedPidAttrs() : ["_"];
-  const disabled = isPid && selected.length === 0;
-  $("createRequestBtn").disabled = disabled;
-  $("invokeDcApiBtn").disabled = disabled;
-  $("submitResponseBtn").disabled = disabled;
+  const selectedCred = getSelectedCred();
+  const isPid = selectedCred === "pid";
+  const isAv = selectedCred === "av";
+  const pidSection = $("pidAttrsSection");
+  const avSection = $("avAttrsSection");
+  if (pidSection) pidSection.classList.toggle("hidden", !isPid);
+  if (avSection) avSection.classList.toggle("hidden", !isAv);
   if ($("pidAttrHint")) {
-    $("pidAttrHint").classList.toggle("hidden", !disabled);
+    $("pidAttrHint").classList.add("hidden");
+  }
+  if ($("avAttrHint")) {
+    $("avAttrHint").classList.add("hidden");
   }
   if (!isPid) setPidAddHint("");
+  if (isPid && getSelectedProtocol() === "oid4vp" && state.generatedRequest && !state.editedRequest) {
+    syncRequestClaimsFromPidCheckboxes();
+  }
+  if (isAv && getSelectedProtocol() === "oid4vp" && state.generatedRequest && !state.editedRequest) {
+    syncRequestClaimsFromAvCheckboxes();
+  }
+  updateProtocolUI();
+}
+
+function syncRequestClaimsFromPidCheckboxes() {
+  const attrs = getSelectedPidAttrs();
+  if (!attrs.length) return;
+  const req = state.generatedRequest;
+  if (!req) return;
+  const target = req.request?.data?.dcql_query || req.dcql_query;
+  if (!target) return;
+  if (!Array.isArray(target.credentials)) target.credentials = [];
+  let cred = target.credentials.find((c) => c?.meta?.doctype_value === "eu.europa.ec.eudi.pid.1");
+  if (!cred) {
+    cred = { id: "pid1", format: "mso_mdoc", meta: { doctype_value: "eu.europa.ec.eudi.pid.1" }, claims: [] };
+    target.credentials.unshift(cred);
+  }
+  cred.id = "pid1";
+  cred.claims = attrs.map((a) => ({ path: ["eu.europa.ec.eudi.pid.1", a] }));
+  setRequestEditor(JSON.stringify(req, null, 2));
+  updateRequestedIdentifiers("eu.europa.ec.eudi.pid.1");
+}
+
+function syncRequestClaimsFromAvCheckboxes() {
+  const attrs = getSelectedAvAttrs();
+  if (!attrs.length) return;
+  const req = state.generatedRequest;
+  if (!req) return;
+  const target = req.request?.data?.dcql_query || req.dcql_query;
+  if (!target) return;
+  if (!Array.isArray(target.credentials)) target.credentials = [];
+  let cred = target.credentials.find((c) => c?.meta?.doctype_value === "eu.europa.ec.av.1");
+  if (!cred) {
+    cred = { id: "av1", format: "mso_mdoc", meta: { doctype_value: "eu.europa.ec.av.1" }, claims: [] };
+    target.credentials.unshift(cred);
+  }
+  cred.id = "av1";
+  cred.claims = attrs.map((a) => ({ path: ["eu.europa.ec.av.1", a] }));
+  setRequestEditor(JSON.stringify(req, null, 2));
+  updateRequestedIdentifiers("eu.europa.ec.av.1");
 }
 
 async function handleCreateRequest() {
   const btn = $("createRequestBtn");
   btn.dataset.label = btn.textContent;
   setLoading(btn, true);
+  let protocol = "oid4vp";
   try {
     const cred = getSelectedCred();
+    protocol = getSelectedProtocol();
+    state.protocol = protocol;
     let url = `/verifier/oid4vp/request?cred=${encodeURIComponent(cred)}`;
     if (cred === "pid") {
       const attrs = getSelectedPidAttrs();
-      if (!attrs.length) throw new Error("Select at least one PID attribute.");
       url += `&attrs=${encodeURIComponent(attrs.join(","))}`;
+    }
+    if (cred === "av") {
+      const attrs = getSelectedAvAttrs();
+      url += `&attrs=${encodeURIComponent(attrs.join(","))}`;
+    }
+    if (protocol === "iso-mdoc") {
+      url = `/verifier/iso-mdoc/request?cred=${encodeURIComponent(cred)}`;
+      if (cred === "pid") {
+        const attrs = getSelectedPidAttrs();
+        if (attrs.length) url += `&attrs=${encodeURIComponent(attrs.join(","))}`;
+      }
+      if (cred === "av") {
+        const attrs = getSelectedAvAttrs();
+        if (attrs.length) url += `&attrs=${encodeURIComponent(attrs.join(","))}`;
+      }
     }
     addLog("info", `Selected cred: ${cred}`);
     addLog("info", `GET ${url}`);
@@ -752,6 +1330,7 @@ async function handleCreateRequest() {
     return data;
   } catch (e) {
     addLog("error", e.message);
+    setStepState(1, "error");
     return null;
   } finally {
     setLoading(btn, false);
@@ -762,29 +1341,73 @@ async function handleInvokeDcApi() {
   const btn = $("invokeDcApiBtn");
   btn.dataset.label = btn.textContent;
   setLoading(btn, true);
+  let protocol = "oid4vp";
   try {
     const cred = getSelectedCred();
+    protocol = getSelectedProtocol();
     if (!state.request?.request_id) {
       throw new Error("Create a request first.");
     }
     const req = getActiveRequest();
     if (!req) throw new Error("No request JSON available.");
     updateRequestedIdentifiers(cred === "av" ? "eu.europa.ec.av.1" : "eu.europa.ec.eudi.pid.1");
+
+    if (protocol === "iso-mdoc") {
+      if (!navigator.credentials || !navigator.credentials.get) {
+        throw new Error("Digital Credentials API not available for ISO 18013-7.");
+      }
+      const requestWrapper = req?.request ? req : state.generatedRequest;
+      const isoData = requestWrapper?.request?.data || requestWrapper?.data || {
+        deviceRequest: req.deviceRequest || state.generatedRequest?.deviceRequest,
+        encryptionInfo: req.encryptionInfo || state.generatedRequest?.encryptionInfo
+      };
+      const isoProtocol = requestWrapper?.request?.protocol || "org-iso-mdoc";
+      if (!isoData.deviceRequest) throw new Error("Missing deviceRequest in ISO request JSON.");
+      if (!isoData.encryptionInfo) throw new Error("Missing encryptionInfo in ISO request JSON.");
+      const isoResponse = await navigator.credentials.get({
+        mediation: "required",
+        digital: {
+          requests: [
+            { protocol: isoProtocol, data: isoData }
+          ]
+        }
+      });
+      if (!isoResponse) throw new Error("No response from wallet");
+      $("dcResponseInput").value = JSON.stringify(isoResponse, null, 2);
+      addLog("info", "ISO presentation response received");
+      setStepState(2, "success");
+      setStepState(3, "success");
+      setStepState(4, "pending");
+      return;
+    }
+
     if (!navigator.credentials || !navigator.credentials.get) {
       throw new Error("Digital Credentials API not available in this browser");
     }
+    const requestWrapper = req?.request ? req : state.generatedRequest;
+    const oid4vpProtocol = requestWrapper?.request?.protocol || state.request?.protocol || "openid4vp-v1-unsigned";
+    const oid4vpData = requestWrapper?.request?.data || req;
     const dcResponse = await navigator.credentials.get({
+      mediation: "required",
       digital: {
         requests: [
-          { protocol: state.request.protocol, data: req }
+          { protocol: oid4vpProtocol, data: oid4vpData }
         ]
       }
     });
     if (!dcResponse) throw new Error("No response from DC API");
     $("dcResponseInput").value = JSON.stringify(dcResponse, null, 2);
     addLog("info", "DC API response received");
+    setStepState(2, "success");
+    setStepState(3, "success");
+    setStepState(4, "pending");
   } catch (e) {
-    addLog("error", e.message);
+    const friendly = protocol === "iso-mdoc" ? mapIsoErrorMessage(e) : null;
+    const message = friendly || e.message;
+    $("errorBanner").textContent = message;
+    $("errorBanner").classList.remove("hidden");
+    addLog("error", message);
+    setStepState(2, "error");
   } finally {
     setLoading(btn, false);
   }
@@ -798,21 +1421,39 @@ async function handleSubmitResponse() {
   input.classList.remove("error");
   $("errorBanner").classList.add("hidden");
 
+  let protocol = "oid4vp";
   try {
-    if (!state.request?.request_id) {
+    const requestId =
+      state.request?.request_id ||
+      state.generatedRequest?.request_id ||
+      state.editedRequest?.request_id;
+    if (!requestId) {
       throw new Error("Missing request_id. Create a request first.");
     }
     const dcResponse = parseTextareaJson();
-    updateRequestedIdentifiers(getSelectedCred() === "av" ? "eu.europa.ec.av.1" : "eu.europa.ec.eudi.pid.1");
-    const data = await postResponse(state.request.request_id, dcResponse);
+    const cred = getSelectedCred();
+    protocol = getSelectedProtocol();
+    setStepState(3, "success");
+    setStepState(4, "active");
+    updateRequestedIdentifiers(cred === "av" ? "eu.europa.ec.av.1" : "eu.europa.ec.eudi.pid.1");
+    const data = (protocol === "iso-mdoc")
+      ? await postIsoResponse(requestId, dcResponse)
+      : await postResponse(requestId, dcResponse);
     renderResults(data);
     addLog("info", "Response verified");
   } catch (e) {
     input.classList.add("error");
     setStatus("bad", "FAIL");
-    $("errorBanner").textContent = e.message;
+    setStepState(4, "error");
+    $("verifyContent").classList.add("hidden");
+    $("resultsEmpty").classList.remove("hidden");
+    const step5 = document.querySelector('.step[data-step="5"]');
+    if (step5) step5.classList.add("hidden");
+    const friendly = protocol === "iso-mdoc" ? mapIsoErrorMessage(e) : null;
+    const message = friendly || e.message;
+    $("errorBanner").textContent = message;
     $("errorBanner").classList.remove("hidden");
-    addLog("error", e.message);
+    addLog("error", message);
   } finally {
     setLoading(btn, false);
   }
@@ -832,10 +1473,13 @@ function handleFileUpload(ev) {
 function resetUI() {
   $("dcResponseInput").value = "";
   $("dcResponseInput").classList.remove("error");
-  $("resultsContent").classList.add("hidden");
+  $("verifyContent").classList.add("hidden");
   $("resultsEmpty").classList.remove("hidden");
+  const step5 = document.querySelector('.step[data-step="5"]');
+  if (step5) step5.classList.add("hidden");
   $("errorBanner").classList.add("hidden");
   setStatus("neutral", "Idle");
+  resetStepStates();
   addLog("info", "UI reset");
 }
 
@@ -889,11 +1533,23 @@ $("copyLogsBtn").addEventListener("click", copyLogs);
 $("applyRequestEditsBtn")?.addEventListener("click", applyRequestEdits);
 $("resetRequestEditsBtn")?.addEventListener("click", resetRequestEdits);
 $("prettyRequestBtn")?.addEventListener("click", prettyPrintRequest);
+$("importMetadataBtn")?.addEventListener("click", importIssuerMetadata);
+$("clearMetadataBtn")?.addEventListener("click", clearIssuerMetadata);
 
 document.querySelectorAll("input[name=cred]").forEach((el) => {
   el.addEventListener("change", updatePidAttrUI);
 });
+document.querySelectorAll("input[name=protocol]").forEach((el) => {
+  el.addEventListener("change", () => {
+    const protocol = getSelectedProtocol();
+    saveProtocol(protocol);
+    updateProtocolUI();
+  });
+});
 document.querySelectorAll("#pidAttrsSection input[type=checkbox][data-attr]").forEach((el) => {
+  el.addEventListener("change", updatePidAttrUI);
+});
+document.querySelectorAll("#avAttrsSection input[type=checkbox][data-av-attr]").forEach((el) => {
   el.addEventListener("change", updatePidAttrUI);
 });
 $("pidSelectAllBtn")?.addEventListener("click", () => {
@@ -902,6 +1558,14 @@ $("pidSelectAllBtn")?.addEventListener("click", () => {
 });
 $("pidSelectNoneBtn")?.addEventListener("click", () => {
   setPidAttrChecks(false);
+  updatePidAttrUI();
+});
+$("avSelectAllBtn")?.addEventListener("click", () => {
+  setAvAttrChecks(true);
+  updatePidAttrUI();
+});
+$("avSelectNoneBtn")?.addEventListener("click", () => {
+  setAvAttrChecks(false);
   updatePidAttrUI();
 });
 if ($("pidAddBtn")) {
@@ -919,6 +1583,20 @@ if ($("pidAddInput")) {
 $("dcResponseInput").addEventListener("keydown", (e) => {
   if (e.ctrlKey && e.key === "Enter") handleSubmitResponse();
 });
+$("dcResponseInput").addEventListener("input", (e) => {
+  const val = e.target.value.trim();
+  if (!val) {
+    setStepState(3, "pending");
+    setStepState(4, "pending");
+    return;
+  }
+  if (state.stepStates[3] !== "success") {
+    setStepState(3, "active");
+  }
+});
 
 setStatus("neutral", "Idle");
+setProtocolSelection(loadProtocol());
 updatePidAttrUI();
+resetStepStates();
+connectServerLogs();

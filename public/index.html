@@ -11,22 +11,84 @@
       <header class="header">
         <div>
           <h1>DC API Verifier</h1>
-          <p class="subtitle">Local dashboard for OpenID4VP (unsigned) + DCQL (mdoc)</p>
+          <p class="subtitle">Local dashboard for OpenID4VP (unsigned) + ISO 18013-7 (DeviceRequest)</p>
         </div>
         <div class="header-actions">
           <button id="resetBtn" class="btn btn-ghost">Reset</button>
         </div>
       </header>
 
+      <section class="protocol-banner card">
+        <div class="protocol-banner-header">
+          <div>
+            <h2>Protocol Selection</h2>
+            <p class="subtitle">This determines the request format and how the response is parsed.</p>
+          </div>
+          <div class="badge badge-warn">Required</div>
+        </div>
+        <div id="protocolSection" class="section">
+          <div class="segmented" role="group" aria-label="Protocol">
+            <label class="seg">
+              <input type="radio" name="protocol" value="oid4vp" checked />
+              <span>OpenID4VP 1.0 (unsigned)</span>
+            </label>
+            <label class="seg">
+              <input type="radio" name="protocol" value="iso-mdoc" />
+              <span>ISO 18013-7 (DeviceRequest)</span>
+            </label>
+          </div>
+          <div id="protocolHelp" class="hint">Select this before generating the request.</div>
+        </div>
+      </section>
+
+      <section class="stepper" aria-label="Flow progress">
+        <div class="stepper-item pending" data-step="1"><span class="stepper-circle">1</span><span class="stepper-label">Build</span></div>
+        <div class="stepper-line"></div>
+        <div class="stepper-item pending" data-step="2"><span class="stepper-circle">2</span><span class="stepper-label">Send</span></div>
+        <div class="stepper-line"></div>
+        <div class="stepper-item pending" data-step="3"><span class="stepper-circle">3</span><span class="stepper-label">Receive</span></div>
+        <div class="stepper-line"></div>
+        <div class="stepper-item pending" data-step="4"><span class="stepper-circle">4</span><span class="stepper-label">Verify</span></div>
+        <div class="stepper-line"></div>
+        <div class="stepper-item pending" data-step="5"><span class="stepper-circle">5</span><span class="stepper-label">Attributes</span></div>
+      </section>
+
       <main class="grid">
         <section class="col">
-          <div class="card">
-            <div class="card-header">
-              <h2>Request</h2>
-              <div class="actions">
-                <button id="createRequestBtn" class="btn btn-ghost">Create request</button>
-                <button id="invokeDcApiBtn" class="btn btn-primary">Send to Wallet</button>
+          <div class="step pending" data-step="1">
+            <div class="step-header">
+              <div class="step-badge">1</div>
+              <div>
+                <div class="step-title">Build Request</div>
+                <div class="step-desc">Choose credential type and requested attributes.</div>
               </div>
+              <div class="step-status">Pending</div>
+            </div>
+            <div class="step-content card">
+              <div class="card-header">
+                <h2>Request</h2>
+                <div class="actions">
+                  <button id="createRequestBtn" class="btn btn-ghost">Create request</button>
+                </div>
+              </div>
+
+            <div class="section supported-credentials">
+              <div class="section-header">
+                <h3>Supported Credentials</h3>
+                <div class="actions">
+                  <button id="importMetadataBtn" class="btn btn-primary" type="button">Import metadata</button>
+                  <button id="clearMetadataBtn" class="btn btn-ghost" type="button">Clear</button>
+                </div>
+              </div>
+              <div class="cred-import">
+                <div>
+                  <label for="issuerMetadataInput">Paste issuer metadata JSON</label>
+                  <textarea id="issuerMetadataInput" class="textarea compact" rows="6" placeholder='{"credential_issuer":"https://issuer.example","credential_configurations_supported":{...}}'></textarea>
+                </div>
+              </div>
+              <div id="credentialCatalog" class="credential-catalog empty">Import metadata to see supported credentials.</div>
+              <div id="issuerSummary" class="issuer-summary hidden"></div>
+              <div id="issuerMetaError" class="error-banner hidden">—</div>
             </div>
 
             <div class="segmented" role="group" aria-label="Credential type">
@@ -86,6 +148,35 @@
               <div id="pidAttrHint" class="hint">Select at least one attribute to continue.</div>
             </div>
 
+            <div id="avAttrsSection" class="section hidden">
+              <div class="section-header">
+                <h3>Age Verification Attributes</h3>
+                <div class="actions">
+                  <button id="avSelectAllBtn" class="btn btn-ghost" type="button">Select all</button>
+                  <button id="avSelectNoneBtn" class="btn btn-ghost" type="button">Select none</button>
+                </div>
+              </div>
+              <div class="checkbox-grid" role="group" aria-label="Age verification attribute selector">
+                <label class="check">
+                  <input type="checkbox" data-av-attr="age_over_18" checked />
+                  <span>age_over_18</span>
+                </label>
+                <label class="check">
+                  <input type="checkbox" data-av-attr="age_over_21" checked />
+                  <span>age_over_21</span>
+                </label>
+                <label class="check">
+                  <input type="checkbox" data-av-attr="issuing_country" />
+                  <span>issuing_country</span>
+                </label>
+                <label class="check">
+                  <input type="checkbox" data-av-attr="expiry_date" />
+                  <span>expiry_date</span>
+                </label>
+              </div>
+              <div id="avAttrHint" class="hint">Select at least one attribute to continue.</div>
+            </div>
+
             <div class="kv-grid">
               <div class="kv-label">request_id</div>
               <div class="kv-value">
@@ -118,32 +209,48 @@
               <textarea id="requestJsonEditor" class="textarea editor" rows="10" spellcheck="false">// click "Create request" to generate</textarea>
             </div>
           </div>
+        </div>
 
-          <div class="card helper">
-            <div class="helper-header">
-              <div class="helper-icon">⇄</div>
-              <div>
-                <h3>Send to Wallet</h3>
-                <p>Use the Digital Credentials API from a compatible browser to fetch the credential.</p>
-              </div>
-            </div>
-            <div class="helper-steps">
-              <div class="step"><span class="dot"></span>Generate a request</div>
-              <div class="step"><span class="dot"></span>Send to Wallet</div>
-              <div class="step"><span class="dot"></span>Paste or submit response</div>
-            </div>
-          </div>
         </section>
 
         <section class="col">
-          <div class="card">
-            <div class="card-header">
-              <h2>Response Input</h2>
-              <div class="actions">
-                <button id="exampleBtn" class="btn btn-ghost">Load example</button>
-                <button id="submitResponseBtn" class="btn btn-primary">Submit response</button>
+          <div class="step pending" data-step="2">
+            <div class="step-header">
+              <div class="step-badge">2</div>
+              <div>
+                <div class="step-title">Send Request</div>
+                <div class="step-desc">Invoke the wallet using DC API.</div>
               </div>
+              <div class="step-status">Pending</div>
             </div>
+            <div class="step-content card">
+              <div class="card-header">
+                <h2>Send to Wallet</h2>
+                <div class="actions">
+                  <button id="invokeDcApiBtn" class="btn btn-primary">Send to Wallet</button>
+                </div>
+              </div>
+              <div class="hint">Requires a compatible browser wallet.</div>
+            </div>
+          </div>
+
+          <div class="step pending" data-step="3">
+            <div class="step-header">
+              <div class="step-badge">3</div>
+              <div>
+                <div class="step-title">Receive Response</div>
+                <div class="step-desc">Paste or upload the wallet response.</div>
+              </div>
+              <div class="step-status">Pending</div>
+            </div>
+            <div class="step-content card">
+              <div class="card-header">
+                <h2>Response Input</h2>
+                <div class="actions">
+                  <button id="exampleBtn" class="btn btn-ghost">Load example</button>
+                  <button id="submitResponseBtn" class="btn btn-primary">Submit response</button>
+                </div>
+              </div>
 
             <div id="errorBanner" class="error-banner hidden">—</div>
 
@@ -151,107 +258,133 @@
             <textarea id="dcResponseInput" class="textarea" rows="10" placeholder='{"protocol":"openid4vp-v1-unsigned","data":{"vp_token":{"pid1":["..."]}}}'></textarea>
             <div class="hint">Ctrl+Enter to submit</div>
 
-            <div class="file-row">
-              <label class="file-label" for="fileInput">Upload .json file</label>
-              <input id="fileInput" type="file" accept=".json,application/json" />
+              <div class="file-row">
+                <label class="file-label" for="fileInput">Upload .json file</label>
+                <input id="fileInput" type="file" accept=".json,application/json" />
+              </div>
             </div>
           </div>
 
-          <div class="card">
-            <div class="card-header">
-              <h2>Results</h2>
-              <div id="statusBadge" class="badge badge-neutral">Idle</div>
+          <div id="resultsContent">
+            <div class="step pending" data-step="4">
+              <div class="step-header">
+                <div class="step-badge">4</div>
+                <div>
+                  <div class="step-title">Decrypt / Verify</div>
+                  <div class="step-desc">Validate signatures and digests.</div>
+                </div>
+                <div class="step-status">Pending</div>
+              </div>
+              <div class="step-content card">
+                <div class="card-header">
+                  <h2>Results</h2>
+                  <div id="statusBadge" class="badge badge-neutral">Idle</div>
+                </div>
+
+                <div id="resultsEmpty" class="empty">Submit a response to see results.</div>
+
+                <div id="verifyContent" class="hidden">
+                  <div class="section">
+                    <h3>Verification</h3>
+                    <div class="status-tiles">
+                      <div class="tile" title="COSE_Sign1 signature verification using issuer certificate">
+                        <div class="tile-icon">✔</div>
+                        <div>
+                          <div class="tile-title">IssuerAuth</div>
+                          <div class="tile-value" id="issuerSig">—</div>
+                        </div>
+                      </div>
+                      <div class="tile" title="ValueDigest checks against MSO digests">
+                        <div class="tile-icon">⌁</div>
+                        <div>
+                          <div class="tile-title">ValueDigests</div>
+                          <div class="tile-value" id="digests">—</div>
+                        </div>
+                      </div>
+                      <div class="tile" title="DeviceAuth signature depends on session transcript">
+                        <div class="tile-icon">◷</div>
+                        <div>
+                          <div class="tile-title">DeviceAuth</div>
+                          <div class="tile-value" id="deviceSig">—</div>
+                        </div>
+                      </div>
+                    </div>
+                    <div id="digestFailures" class="failures"></div>
+                    <div id="verificationNotes" class="verification-notes"></div>
+                  </div>
+
+                  <div class="card nested">
+                    <div class="card-header">
+                      <h3>Certificate</h3>
+                      <div class="actions">
+                        <button id="copySubjectBtn" class="btn btn-icon" title="Copy subject">⧉</button>
+                        <button id="copyIssuerBtn" class="btn btn-icon" title="Copy issuer">⧉</button>
+                      </div>
+                    </div>
+                    <div id="certSummary" class="kv-grid"></div>
+                    <details class="details">
+                      <summary>Raw subject / issuer</summary>
+                      <pre id="certRaw" class="code-block">—</pre>
+                    </details>
+                  </div>
+
+                  <details class="details">
+                    <summary>Show raw JSON</summary>
+                    <div class="section-header">
+                      <h3>Raw response</h3>
+                      <button id="copyResponseJsonBtn" class="btn btn-icon" title="Copy response JSON">⧉</button>
+                    </div>
+                    <label class="toggle-row">
+                      <input id="toggleRawFull" type="checkbox" />
+                      <span>Show full JSON (large)</span>
+                    </label>
+                    <pre id="rawResponse" class="code-block raw-json">—</pre>
+                  </details>
+
+                  <details class="details">
+                    <summary>Debug</summary>
+                    <div class="kv-grid">
+                      <div class="kv-label">byteLength</div>
+                      <div class="kv-value"><code id="byteLength" class="mono">—</code></div>
+                      <div class="kv-label">sha256</div>
+                      <div class="kv-value"><code id="sha256" class="mono">—</code></div>
+                      <div class="kv-label">first16</div>
+                      <div class="kv-value"><code id="first16" class="mono">—</code></div>
+                      <div class="kv-label">last16</div>
+                      <div class="kv-value"><code id="last16" class="mono">—</code></div>
+                      <div class="kv-label">topLevelKind</div>
+                      <div class="kv-value"><code id="topLevelKind" class="mono">—</code></div>
+                    </div>
+                  </details>
+                </div>
+              </div>
             </div>
 
-            <div id="resultsEmpty" class="empty">Submit a response to see results.</div>
-
-            <div id="resultsContent" class="hidden">
-              <div id="identityCard" class="identity-card"></div>
-              <div id="portraitCard" class="portrait-card hidden" aria-live="polite"></div>
-
-              <div class="section">
-                <h3>Requested Attributes</h3>
-                <div id="requestedAttrs" class="kv-grid"></div>
+            <div class="step pending hidden" data-step="5">
+              <div class="step-header">
+                <div class="step-badge">5</div>
+                <div>
+                  <div class="step-title">Display Attributes</div>
+                  <div class="step-desc">Show disclosed attributes and portraits.</div>
+                </div>
+                <div class="step-status">Pending</div>
               </div>
+              <div class="step-content card">
+                <div id="identityCard" class="identity-card"></div>
+                <div id="portraitCard" class="portrait-card hidden" aria-live="polite"></div>
 
-              <details class="details">
-                <summary>Disclosed attributes (debug)</summary>
                 <div class="section">
-                  <div id="claims" class="kv-grid"></div>
+                  <h3>Requested Attributes</h3>
+                  <div id="requestedAttrs" class="kv-grid"></div>
                 </div>
-              </details>
 
-              <div class="section">
-                <h3>Verification</h3>
-                <div class="status-tiles">
-                  <div class="tile" title="COSE_Sign1 signature verification using issuer certificate">
-                    <div class="tile-icon">✔</div>
-                    <div>
-                      <div class="tile-title">IssuerAuth</div>
-                      <div class="tile-value" id="issuerSig">—</div>
-                    </div>
-                  </div>
-                  <div class="tile" title="ValueDigest checks against MSO digests">
-                    <div class="tile-icon">⌁</div>
-                    <div>
-                      <div class="tile-title">ValueDigests</div>
-                      <div class="tile-value" id="digests">—</div>
-                    </div>
-                  </div>
-                  <div class="tile" title="DeviceAuth signature depends on session transcript">
-                    <div class="tile-icon">◷</div>
-                    <div>
-                      <div class="tile-title">DeviceAuth</div>
-                      <div class="tile-value" id="deviceSig">—</div>
-                    </div>
-                  </div>
-                </div>
-                <div id="digestFailures" class="failures"></div>
-              </div>
-
-              <div class="card nested">
-                <div class="card-header">
-                  <h3>Certificate</h3>
-                  <div class="actions">
-                    <button id="copySubjectBtn" class="btn btn-icon" title="Copy subject">⧉</button>
-                    <button id="copyIssuerBtn" class="btn btn-icon" title="Copy issuer">⧉</button>
-                  </div>
-                </div>
-                <div id="certSummary" class="kv-grid"></div>
                 <details class="details">
-                  <summary>Raw subject / issuer</summary>
-                  <pre id="certRaw" class="code-block">—</pre>
+                  <summary>Disclosed attributes (debug)</summary>
+                  <div class="section">
+                    <div id="claims" class="kv-grid"></div>
+                  </div>
                 </details>
               </div>
-
-              <details class="details">
-                <summary>Show raw JSON</summary>
-                <div class="section-header">
-                  <h3>Raw response</h3>
-                  <button id="copyResponseJsonBtn" class="btn btn-icon" title="Copy response JSON">⧉</button>
-                </div>
-                <label class="toggle-row">
-                  <input id="toggleRawFull" type="checkbox" />
-                  <span>Show full JSON (large)</span>
-                </label>
-                <pre id="rawResponse" class="code-block raw-json">—</pre>
-              </details>
-
-              <details class="details">
-                <summary>Debug</summary>
-                <div class="kv-grid">
-                  <div class="kv-label">byteLength</div>
-                  <div class="kv-value"><code id="byteLength" class="mono">—</code></div>
-                  <div class="kv-label">sha256</div>
-                  <div class="kv-value"><code id="sha256" class="mono">—</code></div>
-                  <div class="kv-label">first16</div>
-                  <div class="kv-value"><code id="first16" class="mono">—</code></div>
-                  <div class="kv-label">last16</div>
-                  <div class="kv-value"><code id="last16" class="mono">—</code></div>
-                  <div class="kv-label">topLevelKind</div>
-                  <div class="kv-value"><code id="topLevelKind" class="mono">—</code></div>
-                </div>
-              </details>
             </div>
           </div>
         </section>

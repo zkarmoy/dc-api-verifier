@@ -5,6 +5,14 @@ const express = require("express");
 const cors = require("cors");
 const crypto = require("crypto");
 const cbor = require("cbor");
+const cborx = require("cbor-x");
+let jose = null;
+try {
+  jose = require("jose");
+} catch {
+  jose = null;
+}
+let hpkeCore = null;
 
 const app = express();
 app.use(cors());
@@ -15,6 +23,53 @@ const DEBUG = String(process.env.DEBUG || "").toLowerCase() === "true" || proces
 const log = (...args) => {
   if (DEBUG) console.log(...args);
 };
+
+// -------------------- server log streaming (dev) --------------------
+const logSubscribers = new Set();
+const logBuffer = [];
+const MAX_LOGS = 200;
+
+function pushLog(level, args) {
+  const msg = args
+    .map((a) => {
+      if (typeof a === "string") return a;
+      try {
+        return JSON.stringify(a);
+      } catch {
+        return String(a);
+      }
+    })
+    .join(" ");
+  const entry = { ts: Date.now(), level, msg };
+  logBuffer.push(entry);
+  if (logBuffer.length > MAX_LOGS) logBuffer.shift();
+  const payload = `data: ${JSON.stringify(entry)}\n\n`;
+  for (const res of logSubscribers) {
+    try {
+      res.write(payload);
+    } catch {
+      // ignore broken connections
+    }
+  }
+}
+
+const origLog = console.log.bind(console);
+const origWarn = console.warn.bind(console);
+const origError = console.error.bind(console);
+console.log = (...args) => {
+  origLog(...args);
+  pushLog("info", args);
+};
+console.warn = (...args) => {
+  origWarn(...args);
+  pushLog("warn", args);
+};
+console.error = (...args) => {
+  origError(...args);
+  pushLog("error", args);
+};
+
+let hpkeCorePromise = null;
 
 /**
  * In-memory state store (dev only).
@@ -52,9 +107,31 @@ function normalizeB64Url(s) {
 
 function b64urlToBuf(s) {
   const clean = normalizeB64Url(s);
-  const pad = "=".repeat((4 - (clean.length % 4)) % 4);
-  const b64 = (clean + pad).replace(/-/g, "+").replace(/_/g, "/");
-  return Buffer.from(b64, "base64");
+  return Buffer.from(clean, "base64url");
+}
+
+function bufToB64url(buf) {
+  return Buffer.from(buf).toString("base64url");
+}
+
+function first16Hex(buf) {
+  return Buffer.from(buf).slice(0, 16).toString("hex");
+}
+
+function decodeAndCompare(referenceB64Url, generatedB64Url, label) {
+  if (!referenceB64Url) return;
+  try {
+    const refBytes = b64urlToBuf(referenceB64Url);
+    const genBytes = b64urlToBuf(generatedB64Url);
+    const refDecoded = cborx.decode(refBytes);
+    const genDecoded = cborx.decode(genBytes);
+    log(`[iso-mdoc] ${label} ref first16:`, first16Hex(refBytes));
+    log(`[iso-mdoc] ${label} gen first16:`, first16Hex(genBytes));
+    log(`[iso-mdoc] ${label} ref decoded:`, refDecoded);
+    log(`[iso-mdoc] ${label} gen decoded:`, genDecoded);
+  } catch (e) {
+    log(`[iso-mdoc] ${label} decodeAndCompare failed:`, e?.message);
+  }
 }
 
 function isBstr(v) {
@@ -67,6 +144,17 @@ function toBuf(v) {
 
 function isTagged(v, tag) {
   return v instanceof cbor.Tagged && v.tag === tag;
+}
+
+function unwrapCborBstr(bytes) {
+  try {
+    const v = cborDecode(bytes);
+    if (isTagged(v, 24) && isBstr(v.value)) return toBuf(v.value);
+    if (isBstr(v)) return toBuf(v);
+  } catch {
+    return null;
+  }
+  return null;
 }
 
 function cborDecode(bytes) {
@@ -144,6 +232,78 @@ function generateEphemeralP256Jwk() {
   };
 }
 
+function isJwtLike(s) {
+  if (typeof s !== "string") return false;
+  const parts = s.split(".");
+  return parts.length === 3 || parts.length === 5;
+}
+
+async function decodeDcApiJwt(jwt, stored) {
+  if (!jose) {
+    throw new Error("JOSE library not installed (npm i jose) for dc_api.jwt handling");
+  }
+  const parts = jwt.split(".");
+  if (parts.length === 5) {
+    const privateKey = await jose.importJWK(stored?.enc_private_jwk, "ECDH-ES");
+    const { plaintext, protectedHeader } = await jose.compactDecrypt(jwt, privateKey);
+    return { plaintext, protectedHeader, type: "jwe" };
+  }
+  if (parts.length === 3) {
+    const protectedHeader = jose.decodeProtectedHeader(jwt);
+    const payload = jose.decodeJwt(jwt); // decode without verify (no sig key)
+    return { payload, protectedHeader, type: "jws" };
+  }
+  throw new Error("Unsupported JWT format");
+}
+
+function encodeLenPrefixed(buf) {
+  const b = buf ? Buffer.from(buf) : Buffer.alloc(0);
+  const out = Buffer.concat([Buffer.alloc(4), b]);
+  out.writeUInt32BE(b.length, 0);
+  return out;
+}
+
+function concatKdf(z, alg, keyLenBytes, partyUInfo, partyVInfo, algIdOverride) {
+  const algStr = algIdOverride || alg;
+  const algBuf = Buffer.from(algStr, "utf8");
+  const algId = encodeLenPrefixed(algBuf);
+  const partyU = encodeLenPrefixed(partyUInfo);
+  const partyV = encodeLenPrefixed(partyVInfo);
+  const suppPubInfo = Buffer.alloc(4);
+  suppPubInfo.writeUInt32BE(keyLenBytes * 8, 0);
+  const suppPrivInfo = Buffer.alloc(0);
+
+  const hashLen = 32; // SHA-256
+  const reps = Math.ceil(keyLenBytes / hashLen);
+  const buffers = [];
+  for (let i = 1; i <= reps; i++) {
+    const counter = Buffer.alloc(4);
+    counter.writeUInt32BE(i, 0);
+    const input = Buffer.concat([counter, z, algId, partyU, partyV, suppPubInfo, suppPrivInfo]);
+    buffers.push(crypto.createHash("sha256").update(input).digest());
+  }
+  return Buffer.concat(buffers).slice(0, keyLenBytes);
+}
+
+function coseAlgToJose(alg) {
+  if (alg === 1) return "A128GCM";
+  if (alg === 2) return "A192GCM";
+  if (alg === 3) return "A256GCM";
+  return null;
+}
+
+async function getHpkeSuite() {
+  if (!hpkeCorePromise) {
+    hpkeCorePromise = import("@hpke/core");
+  }
+  const { CipherSuite, Aes128Gcm, DhkemP256HkdfSha256, HkdfSha256 } = await hpkeCorePromise;
+  return new CipherSuite({
+    kem: new DhkemP256HkdfSha256(),
+    kdf: new HkdfSha256(),
+    aead: new Aes128Gcm()
+  });
+}
+
 function cleanupOld(ttlMs) {
   const now = Date.now();
   for (const [id, st] of stateStore.entries()) {
@@ -182,17 +342,50 @@ function parseIssuerSignedItems(nameSpaces) {
   const nsEntries = nameSpaces instanceof Map ? Array.from(nameSpaces.entries()) : Object.entries(nameSpaces || {});
 
   for (const [ns, items] of nsEntries) {
-    const arr = Array.isArray(items) ? items : [];
+    if (DEBUG) {
+      const t = items instanceof Map ? "Map" : Array.isArray(items) ? "Array" : typeof items;
+      const keys = items && typeof items === "object" ? mapKeys(items) : [];
+      console.log("[iso-mdoc] ns", ns, "items type:", t, "keys:", keys.slice(0, 10));
+      const first = Array.isArray(items) ? items[0] : (items instanceof Map ? items.values().next().value : Object.values(items || {})[0]);
+      if (first !== undefined) {
+        const firstType = isBstr(first) ? "bstr" : (first && typeof first === "object" ? first.constructor?.name || "object" : typeof first);
+        console.log("[iso-mdoc] ns", ns, "first item type:", firstType, "len:", isBstr(first) ? toBuf(first).length : undefined);
+        try {
+          const decodedFirst = isBstr(first) ? cborDecode(toBuf(first)) : first;
+          if (decodedFirst && typeof decodedFirst === "object") {
+            console.log("[iso-mdoc] ns", ns, "first decoded keys:", mapKeys(decodedFirst));
+          }
+        } catch (e) {
+          console.log("[iso-mdoc] ns", ns, "first decode failed:", e?.message);
+        }
+      }
+    }
+    const arr = Array.isArray(items)
+      ? items
+      : (items instanceof Map ? Array.from(items.values()) : (items && typeof items === "object" ? Object.values(items) : []));
     for (const raw of arr) {
       let itemBytes = null;
+      let itemBytesTagged = null;
+      let itemBytesInner = null;
       let decoded = raw;
 
-      if (isTagged(raw, 24) && isBstr(raw.value)) {
-        itemBytes = toBuf(raw.value);
-        decoded = cborDecode(itemBytes);
+      const isTaggedObj = raw && typeof raw === "object" && raw.tag === 24 && raw.value !== undefined;
+
+      if ((isTagged(raw, 24) || isTaggedObj) && isBstr((raw || {}).value)) {
+        itemBytesInner = toBuf(raw.value);
+        itemBytesTagged = cbor.encodeCanonical(new cbor.Tagged(24, itemBytesInner));
+        itemBytes = itemBytesTagged;
+        decoded = cborDecode(itemBytesInner);
+      } else if ((isTagged(raw, 24) || isTaggedObj) && raw.value && typeof raw.value === "object" && isBstr(raw.value.value)) {
+        itemBytesInner = toBuf(raw.value.value);
+        itemBytesTagged = cbor.encodeCanonical(new cbor.Tagged(24, itemBytesInner));
+        itemBytes = itemBytesTagged;
+        decoded = cborDecode(itemBytesInner);
       } else if (isBstr(raw)) {
-        itemBytes = toBuf(raw);
-        decoded = cborDecode(itemBytes);
+        itemBytesInner = toBuf(raw);
+        itemBytesTagged = cbor.encodeCanonical(new cbor.Tagged(24, itemBytesInner));
+        itemBytes = itemBytesTagged;
+        decoded = cborDecode(itemBytesInner);
       }
 
       if (decoded && decoded.elementIdentifier !== undefined) {
@@ -201,7 +394,9 @@ function parseIssuerSignedItems(nameSpaces) {
           digestID: decoded.digestID,
           elementIdentifier: decoded.elementIdentifier,
           elementValue: decoded.elementValue,
-          issuerSignedItemBytes: itemBytes
+          issuerSignedItemBytes: itemBytes,
+          issuerSignedItemBytesTagged: itemBytesTagged,
+          issuerSignedItemBytesInner: itemBytesInner
         });
       }
     }
@@ -273,25 +468,64 @@ function verifyIssuerAuthSignature(issuerAuthCoseSign1, x5chain) {
 }
 
 function verifyValueDigests(disclosed, valueDigests) {
+  const hasValueDigests = valueDigests && mapKeys(valueDigests).length > 0;
+  if (!hasValueDigests) {
+    return {
+      allOk: null,
+      perItem: disclosed.map((d) => ({
+        namespace: d.namespace,
+        digestID: d.digestID,
+        elementIdentifier: d.elementIdentifier,
+        ok: null
+      })),
+      reason: "valueDigests missing or empty"
+    };
+  }
+
   let allOk = true;
   const perItem = [];
+  const debugPerItem = [];
   let debugPrinted = false;
 
+  const findNamespaceMap = (vd, ns) => {
+    if (!vd) return null;
+    const direct = mapGet(vd, ns);
+    if (direct) return direct;
+    if (vd instanceof Map) {
+      const nsBuf = Buffer.from(ns, "utf8");
+      for (const [k, v] of vd.entries()) {
+        if (typeof k === "string" && k === ns) return v;
+        if (isBstr(k) && Buffer.compare(toBuf(k), nsBuf) === 0) return v;
+      }
+    } else if (typeof vd === "object") {
+      const keys = Object.keys(vd);
+      for (const k of keys) {
+        if (k === ns) return vd[k];
+      }
+    }
+    return null;
+  };
+
   for (const item of disclosed) {
-    const nsMap = mapGet(valueDigests, item.namespace);
+    const nsMap = findNamespaceMap(valueDigests, item.namespace);
     const expected = nsMap ? mapGet(nsMap, item.digestID) : null;
 
     let ok = false;
     let computedHex;
     let expectedHex;
-    if (item.issuerSignedItemBytes) {
-      // IMPORTANT: hash exact embedded CBOR bytes from Tag(24)
-      const computed = crypto.createHash("sha256").update(item.issuerSignedItemBytes).digest();
+    const expectedBuf = expected ? toBuf(expected) : null;
+    const tryBytes = (bytes) => {
+      if (!bytes || !expectedBuf) return false;
+      const computed = crypto.createHash("sha256").update(bytes).digest();
       computedHex = computed.toString("hex");
-      if (expected) {
-        expectedHex = toBuf(expected).toString("hex");
-        ok = Buffer.compare(computed, toBuf(expected)) === 0;
-      }
+      expectedHex = expectedBuf.toString("hex");
+      return Buffer.compare(computed, expectedBuf) === 0;
+    };
+    // Prefer tagged bytes (Tag 24 wrapper). Fallback to inner bytes if needed.
+    const taggedBytes = item.issuerSignedItemBytesTagged || item.issuerSignedItemBytes;
+    ok = tryBytes(taggedBytes);
+    if (!ok) {
+      ok = tryBytes(item.issuerSignedItemBytesInner);
     }
     if (!ok) allOk = false;
 
@@ -302,8 +536,28 @@ function verifyValueDigests(disclosed, valueDigests) {
       ok
     });
 
+    if (DEBUG) {
+      const taggedHex = taggedBytes
+        ? crypto.createHash("sha256").update(taggedBytes).digest("hex")
+        : null;
+      const innerHex = item.issuerSignedItemBytesInner
+        ? crypto.createHash("sha256").update(item.issuerSignedItemBytesInner).digest("hex")
+        : null;
+      debugPerItem.push({
+        namespace: item.namespace,
+        digestID: item.digestID,
+        elementIdentifier: item.elementIdentifier,
+        expectedHex: expectedBuf ? expectedBuf.toString("hex") : null,
+        taggedHex,
+        innerHex,
+        matched: ok ? (taggedHex === expectedHex ? "tagged" : innerHex === expectedHex ? "inner" : "unknown") : null
+      });
+    }
+
     if (!ok && !debugPrinted && DEBUG) {
       console.log("[valueDigest debug]");
+      console.log("valueDigests keys:", mapKeys(valueDigests));
+      if (nsMap) console.log("nsMap keys:", mapKeys(nsMap));
       console.log("namespace:", item.namespace);
       console.log("digestID:", item.digestID);
       console.log("issuerSignedItemBytes.length:", item.issuerSignedItemBytes ? item.issuerSignedItemBytes.length : 0);
@@ -314,7 +568,123 @@ function verifyValueDigests(disclosed, valueDigests) {
     }
   }
 
-  return { allOk, perItem };
+  return { allOk, perItem, debugPerItem };
+}
+
+// -------------------- HPKE (RFC 9180) Helpers --------------------
+const HPKE_SUITE_ID = Buffer.from("HPKE\x00\x10\x00\x01\x00\x01", "binary"); // P-256, HKDF-SHA256, AES-128-GCM
+
+function hkdfExtract(salt, ikm) {
+  // RFC 5869: PRK = HMAC-Hash(salt, IKM)
+  // If salt is not provided, it is set to a string of HashLen zeros.
+  const saltBuf = (salt && salt.length > 0) ? salt : Buffer.alloc(32, 0);
+  return crypto.createHmac("sha256", saltBuf).update(ikm).digest();
+}
+
+function hkdfExpand(prk, info, length) {
+  // RFC 5869: OKM = HKDF-Expand(PRK, info, L)
+  const hashLen = 32;
+  const n = Math.ceil(length / hashLen);
+  const okmBuffers = [];
+  let t = Buffer.alloc(0);
+  for (let i = 1; i <= n; i++) {
+    const hmac = crypto.createHmac("sha256", prk);
+    hmac.update(t);
+    hmac.update(info);
+    hmac.update(Buffer.from([i]));
+    t = hmac.digest();
+    okmBuffers.push(t);
+  }
+  return Buffer.concat(okmBuffers).slice(0, length);
+}
+
+function labeledExtract(salt, label, ikm) {
+  // RFC 9180: labeled_ikm = concat("HPKE-v1", suite_id, label, ikm)
+  const protocolLabel = Buffer.from("HPKE-v1", "utf8");
+  const labelBytes = Buffer.from(label, "utf8");
+  const labeledIkm = Buffer.concat([protocolLabel, HPKE_SUITE_ID, labelBytes, ikm]);
+  return hkdfExtract(salt, labeledIkm);
+}
+
+function labeledExpand(prk, label, info, length) {
+  // RFC 9180: labeled_info = concat(I2OSP(L, 2), "HPKE-v1", suite_id, label, info)
+  const protocolLabel = Buffer.from("HPKE-v1", "utf8");
+  const labelBytes = Buffer.from(label, "utf8");
+  const lenBuf = Buffer.alloc(2);
+  lenBuf.writeUInt16BE(length);
+  const labeledInfo = Buffer.concat([lenBuf, protocolLabel, HPKE_SUITE_ID, labelBytes, info]);
+  return hkdfExpand(prk, labeledInfo, length);
+}
+
+function jwkToRawP256(jwk) {
+  if (!jwk || !jwk.x || !jwk.y) throw new Error("Invalid JWK");
+  const x = b64urlToBuf(jwk.x);
+  const y = b64urlToBuf(jwk.y);
+  return Buffer.concat([Buffer.from([0x04]), x, y]);
+}
+
+function coseKeyToRawP256(map) {
+  const x = map.get(-2);
+  const y = map.get(-3);
+  if (!x || !y) throw new Error("Invalid COSE Key");
+  return Buffer.concat([Buffer.from([0x04]), toBuf(x), toBuf(y)]);
+}
+
+/**
+ * HELPER: Derive Session Key for ISO mDoc (DCAPI/Google Profile)
+ * Uses HKDF to derive 44 bytes (32 for AES Key, 12 for IV).
+ */
+function deriveSessionKey(verifierPrivJwk, walletPub, nonceBuffer) {
+  // 1. Reconstruct Wallet Public Key from raw bytes or Map
+  let xBuf, yBuf;
+
+  if (isTagged(walletPub, 24)) walletPub = walletPub.value;
+
+  if (walletPub instanceof Map) {
+    xBuf = walletPub.get(-2) ? toBuf(walletPub.get(-2)) : null;
+    yBuf = walletPub.get(-3) ? toBuf(walletPub.get(-3)) : null;
+  } else if (Buffer.isBuffer(walletPub)) {
+    if (walletPub.length === 65 && walletPub[0] === 0x04) {
+      xBuf = walletPub.slice(1, 33);
+      yBuf = walletPub.slice(33, 65);
+    } else {
+      try {
+        const decoded = cbor.decodeFirstSync(walletPub);
+        if (decoded instanceof Map) {
+          xBuf = toBuf(decoded.get(-2));
+          yBuf = toBuf(decoded.get(-3));
+        }
+      } catch (e) {
+        if (walletPub.length === 64) {
+          xBuf = walletPub.slice(0, 32);
+          yBuf = walletPub.slice(32, 64);
+        }
+      }
+    }
+  }
+
+  if (!xBuf || !yBuf) throw new Error("Could not extract Wallet Public Key from 'cenc'");
+
+  const walletPubJwk = {
+    kty: "EC", crv: "P-256",
+    x: bufToB64url(xBuf),
+    y: bufToB64url(yBuf)
+  };
+
+  // 2. Compute Shared Secret (ECDH)
+  const verifierKey = crypto.createPrivateKey({ key: verifierPrivJwk, format: "jwk" });
+  const walletKeyObj = crypto.createPublicKey({ key: walletPubJwk, format: "jwk" });
+  const sharedSecret = crypto.diffieHellman({ privateKey: verifierKey, publicKey: walletKeyObj });
+
+  // 3. HKDF-SHA256
+  // Info="SKDevice", Salt=nonce. Output 44 bytes (32 Key + 12 IV)
+  const info = Buffer.from("SKDevice", "utf8");
+  const keyMaterial = crypto.hkdfSync("sha256", sharedSecret, nonceBuffer, info, 44);
+
+  return {
+    aesKey: keyMaterial.slice(0, 32),
+    iv: keyMaterial.slice(32, 44)
+  };
 }
 
 function parseDn(dn) {
@@ -422,6 +792,15 @@ function parseMdocAndVerify(deviceResponseOrDocumentB64Url) {
   const issuerAuth = mapGet(issuerSigned, "issuerAuth");
   const nameSpaces = mapGet(issuerSigned, "nameSpaces") || new Map();
 
+  if (DEBUG) {
+    const nsType = nameSpaces instanceof Map ? "Map" : Array.isArray(nameSpaces) ? "Array" : typeof nameSpaces;
+    console.log("[iso-mdoc] issuerSigned keys:", mapKeys(issuerSigned));
+    console.log("[iso-mdoc] nameSpaces type:", nsType);
+    if (nameSpaces && typeof nameSpaces === "object") {
+      console.log("[iso-mdoc] nameSpaces keys:", mapKeys(nameSpaces));
+    }
+  }
+
   const disclosed = parseIssuerSignedItems(nameSpaces);
 
   const issuerAuthParsed = issuerAuth ? parseIssuerAuth(issuerAuth) : null;
@@ -497,10 +876,12 @@ app.get("/verifier/oid4vp/request", (req, res) => {
     console.log("[request] query:", req.query);
   }
   const request_id = randomB64url(16);
-  const nonce = randomB64url(32);
+  const sessionId = crypto.randomUUID();
+  const nonce = sessionId;
   const state = randomB64url(16);
 
   const { publicJwk, privateJwk } = generateEphemeralP256Jwk();
+  const { publicJwk: encPublicJwk, privateJwk: encPrivateJwk } = generateEphemeralP256Jwk();
 
   const cred = String(req.query.cred || "pid").toLowerCase();
   const isAv = cred === "av";
@@ -513,30 +894,41 @@ app.get("/verifier/oid4vp/request", (req, res) => {
 
   const credId = isAv ? "av1" : "pid1";
   const defaultPidAttrs = ["family_name", "given_name", "birth_date"];
+  const defaultAvAttrs = ["age_over_18", "age_over_21", "issuing_country", "expiry_date"];
   const attrsParam = String(req.query.attrs || "").trim();
-  const requestedAttrs = !isAv
-    ? (attrsParam ? attrsParam.split(",").map((s) => s.trim()).filter(Boolean) : defaultPidAttrs)
-    : [];
+  const requestedAttrs = isAv
+    ? (attrsParam ? attrsParam.split(",").map((s) => s.trim()).filter(Boolean) : defaultAvAttrs)
+    : (attrsParam ? attrsParam.split(",").map((s) => s.trim()).filter(Boolean) : defaultPidAttrs);
 
-  const claims = isAv
-    ? [
-        { path: [namespace, "age_over_18"] },
-        { path: [namespace, "age_over_21"] },
-        { path: [namespace, "issuing_country"] },
-        { path: [namespace, "expiry_date"] }
-      ]
-    : requestedAttrs.map((a) => ({ path: [namespace, a] }));
+  const claims = requestedAttrs.map((a) => ({ path: [namespace, a] }));
 
-  const request = {
+  const origin = "http://localhost:3000";
+  const clientId = `web-origin:${origin}`;
+  const requestData = {
     response_type: "vp_token",
-    response_mode: "dc_api",
+    response_mode: "dc_api.jwt",
     nonce,
-    state,
+    client_id: clientId,
+    expected_origins: [origin],
     client_metadata: {
+      jwks: {
+        keys: [
+          {
+            kty: encPublicJwk.kty,
+            use: "enc",
+            crv: encPublicJwk.crv,
+            kid: "key-1",
+            x: encPublicJwk.x,
+            y: encPublicJwk.y,
+            alg: "ECDH-ES"
+          }
+        ]
+      },
+      encrypted_response_enc_values_supported: ["A256GCM", "A128GCM"],
       vp_formats_supported: {
         mso_mdoc: {
-          deviceauth_alg_values: [-7],
-          issuerauth_alg_values: [-7]
+          deviceauth_alg_values: [-7, -9],
+          issuerauth_alg_values: [-7, -9]
         }
       }
     },
@@ -548,8 +940,19 @@ app.get("/verifier/oid4vp/request", (req, res) => {
           meta: { doctype_value: doctype },
           claims
         }
+      ],
+      credential_sets: [
+        {
+          options: [[credId]],
+          purpose: isAv ? "Verify age" : "Verify user identity"
+        }
       ]
     }
+  };
+
+  const request = {
+    protocol: "openid4vp-v1-unsigned",
+    data: requestData
   };
 
   stateStore.set(request_id, {
@@ -565,14 +968,142 @@ app.get("/verifier/oid4vp/request", (req, res) => {
     nonce,
     state,
     private_key_jwk: privateJwk,
-    public_key_jwk: publicJwk
+    public_key_jwk: publicJwk,
+    sessionId,
+    enc_private_jwk: encPrivateJwk,
+    enc_public_jwk: encPublicJwk
   });
 
   res.json({
-    protocol: "openid4vp-v1-unsigned",
-    request_id,
+    sessionId,
     request,
+    request_id,
     state_hint: { nonce, state, public_key_jwk: publicJwk }
+  });
+});
+
+/**
+ * GET /verifier/iso-mdoc/request?cred=pid|av
+ */
+app.get("/verifier/iso-mdoc/request", (req, res) => {
+  if (DEBUG) {
+    console.log("[iso-mdoc request] query:", req.query);
+  }
+  const request_id = randomB64url(16);
+  const sessionId = crypto.randomUUID();
+
+  const cred = String(req.query.cred || "av").toLowerCase();
+  const isAv = cred === "av";
+  if (DEBUG) {
+    console.log("[iso-mdoc request] cred selected:", cred);
+  }
+  const doctype = isAv ? "eu.europa.ec.av.1" : "eu.europa.ec.eudi.pid.1";
+  const origin = "http://localhost:3000";
+  const attrsParam = String(req.query.attrs || "").trim();
+  const defaultPidAttrs = ["family_name", "given_name", "birth_date"];
+  const defaultAvAttrs = ["age_over_18", "age_over_21", "issuing_country", "expiry_date"];
+  const requestedAttrs = isAv
+    ? (attrsParam ? attrsParam.split(",").map((s) => s.trim()).filter(Boolean) : defaultAvAttrs)
+    : (attrsParam ? attrsParam.split(",").map((s) => s.trim()).filter(Boolean) : defaultPidAttrs);
+
+  const embeddedItems = {
+    docType: doctype,
+    nameSpaces: {
+      [doctype]: {}
+    }
+  };
+  requestedAttrs.forEach((a) => { embeddedItems.nameSpaces[doctype][a] = false; });
+  const embeddedBytes = cbor.encodeCanonical(embeddedItems);
+  const taggedItemsRequest = new cbor.Tagged(24, embeddedBytes);
+
+  const deviceRequest = {
+    version: "1.0",
+    docRequests: [
+      {
+        itemsRequest: taggedItemsRequest
+      }
+    ]
+  };
+
+  const deviceRequestBytes = cbor.encodeCanonical(deviceRequest);
+  const deviceRequestB64Url = bufToB64url(deviceRequestBytes);
+
+  const { publicKey, privateKey } = crypto.generateKeyPairSync("ec", { namedCurve: "prime256v1" });
+  const pubJwk = publicKey.export({ format: "jwk" });
+  const privJwk = privateKey.export({ format: "jwk" });
+  const coseKey = new Map([
+    [1, 2],
+    [-1, 1],
+    [-2, Buffer.from(pubJwk.x, "base64url")],
+    [-3, Buffer.from(pubJwk.y, "base64url")]
+  ]);
+  const encryptionInfoNonce = crypto.randomBytes(16);
+  const encryptionInfo = [
+    "dcapi",
+    {
+      nonce: encryptionInfoNonce,
+      recipientPublicKey: coseKey
+    }
+  ];
+  const encryptionInfoBytes = cbor.encodeCanonical(encryptionInfo);
+  const encryptionInfoB64Url = bufToB64url(encryptionInfoBytes);
+
+  const decodedDeviceRequest = cborDecode(deviceRequestBytes);
+  const docReq = decodedDeviceRequest?.docRequests?.[0];
+  const itemsIsTagged = docReq?.itemsRequest instanceof cbor.Tagged && docReq.itemsRequest.tag === 24;
+  const taggedValue = itemsIsTagged ? docReq.itemsRequest.value : null;
+  const decodedItemsRequest = taggedValue && isBstr(taggedValue) ? cborDecode(toBuf(taggedValue)) : null;
+  const decodedEncryptionInfo = cborDecode(encryptionInfoBytes);
+  const topKeys = decodedDeviceRequest && typeof decodedDeviceRequest === "object" ? Object.keys(decodedDeviceRequest) : [];
+  const docReqKeys = docReq && typeof docReq === "object" ? Object.keys(docReq) : [];
+  const itemsKeys = decodedItemsRequest && typeof decodedItemsRequest === "object" ? Object.keys(decodedItemsRequest) : [];
+  const encIsArray = Array.isArray(decodedEncryptionInfo);
+  const encOk = encIsArray && decodedEncryptionInfo.length === 2 && decodedEncryptionInfo[0] === "dcapi";
+  log("[iso-mdoc] DeviceRequest top-level keys:", topKeys);
+  log("[iso-mdoc] docRequest keys:", docReqKeys);
+  log("[iso-mdoc] itemsRequest is Tag(24):", itemsIsTagged);
+  log("[iso-mdoc] itemsRequest keys:", itemsKeys);
+  log("[iso-mdoc] encryptionInfo array ok:", encOk);
+  log("[iso-mdoc] deviceRequest first16:", first16Hex(deviceRequestBytes));
+  log("[iso-mdoc] encryptionInfo first16:", first16Hex(encryptionInfoBytes));
+  log("[iso-mdoc] DeviceRequest decoded:", decodedDeviceRequest);
+  log("[iso-mdoc] ItemsRequest decoded:", decodedItemsRequest);
+  log("[iso-mdoc] encryptionInfo decoded:", decodedEncryptionInfo);
+  decodeAndCompare(process.env.REF_DEVICE_REQUEST_B64URL, deviceRequestB64Url, "deviceRequest");
+  decodeAndCompare(process.env.REF_ENCRYPTION_INFO_B64URL, encryptionInfoB64Url, "encryptionInfo");
+
+  stateStore.set(request_id, {
+    createdAt: Date.now(),
+    request_id,
+    credential_type: "mso_mdoc",
+    doctype,
+    pidNamespace: doctype,
+    credential_id: isAv ? "av1" : "pid1",
+    credType: isAv ? "av" : "pid",
+    credId: isAv ? "av1" : "pid1",
+    requestedAttrs,
+    origin,
+    protocol: "org-iso-mdoc",
+    encryption_nonce: encryptionInfoNonce,
+    encryption_info_bytes: encryptionInfoBytes,
+    device_request_bytes: deviceRequestBytes,
+    private_key_jwk: privJwk,
+    public_key_jwk: pubJwk
+  });
+
+  console.log("DEV private_key_jwk", request_id, privJwk);
+  console.log("DEV encryption_nonce", request_id, encryptionInfoNonce.toString("hex"));
+
+  res.json({
+    sessionId,
+    request: {
+      protocol: "org-iso-mdoc",
+      data: {
+        deviceRequest: deviceRequestB64Url,
+        encryptionInfo: encryptionInfoB64Url
+      }
+    },
+    request_id
   });
 });
 
@@ -587,9 +1118,29 @@ app.get("/portrait/:request_id", (req, res) => {
 });
 
 /**
+ * GET /logs/stream (Server-sent events)
+ */
+app.get("/logs/stream", (req, res) => {
+  res.setHeader("Content-Type", "text/event-stream");
+  res.setHeader("Cache-Control", "no-cache");
+  res.setHeader("Connection", "keep-alive");
+  res.flushHeaders?.();
+
+  const recent = logBuffer.slice(-50);
+  recent.forEach((entry) => {
+    res.write(`data: ${JSON.stringify(entry)}\n\n`);
+  });
+
+  logSubscribers.add(res);
+  req.on("close", () => {
+    logSubscribers.delete(res);
+  });
+});
+
+/**
  * POST /verifier/oid4vp/response
  */
-app.post("/verifier/oid4vp/response", (req, res) => {
+app.post("/verifier/oid4vp/response", async (req, res) => {
   const { request_id, dcResponse } = req.body || {};
 
   if (!request_id || !stateStore.has(request_id)) {
@@ -603,10 +1154,71 @@ app.post("/verifier/oid4vp/response", (req, res) => {
     return res.status(400).json({ ok: false, error: "Missing dcResponse in POST body." });
   }
 
-  const vpToken = dcResponse?.data?.vp_token;
   const stored = stateStore.get(request_id);
   const credId = stored?.credId || stored?.credential_id || "pid1";
-  const pidArr = vpToken?.[credId];
+  let vpToken = dcResponse?.data?.vp_token;
+  let pidArr = vpToken?.[credId];
+
+  // dc_api.jwt handling (JWE/JWS)
+  const jwtCandidate = typeof dcResponse?.data === "string"
+    ? dcResponse.data
+    : (typeof dcResponse?.data?.response === "string" ? dcResponse.data.response : null);
+  if ((!pidArr || !Array.isArray(pidArr)) && jwtCandidate && isJwtLike(jwtCandidate)) {
+    try {
+      const decoded = await decodeDcApiJwt(jwtCandidate, stored);
+      let payloadObj = null;
+      if (decoded.type === "jwe") {
+        if (DEBUG) {
+          console.log("[oid4vp] jwe header:", decoded.protectedHeader);
+        }
+        const text = Buffer.from(decoded.plaintext).toString("utf8");
+        try {
+          payloadObj = JSON.parse(text);
+        } catch {
+          if (isJwtLike(text) && jose?.decodeJwt) {
+            if (DEBUG) console.log("[oid4vp] JWE plaintext is JWT; decoding without verify");
+            payloadObj = jose.decodeJwt(text);
+          } else {
+            throw new Error("JWE plaintext is not valid JSON or JWT");
+          }
+        }
+      } else if (decoded.type === "jws") {
+        if (DEBUG) {
+          console.log("[oid4vp] jws header:", decoded.protectedHeader);
+        }
+        payloadObj = decoded.payload;
+      }
+      if (DEBUG) {
+        console.log("[oid4vp] decoded jwt type:", decoded.type);
+        console.log("[oid4vp] payload keys:", payloadObj && typeof payloadObj === "object" ? Object.keys(payloadObj) : []);
+      }
+      vpToken = payloadObj?.vp_token || payloadObj?.data?.vp_token || payloadObj?.response?.vp_token;
+      if (!vpToken && payloadObj?.response && isJwtLike(payloadObj.response) && jose?.decodeJwt) {
+        if (DEBUG) console.log("[oid4vp] nested response JWT; decoding without verify");
+        const nested = jose.decodeJwt(payloadObj.response);
+        vpToken = nested?.vp_token || nested?.data?.vp_token;
+      }
+      if (DEBUG && vpToken && typeof vpToken === "object") {
+        console.log("[oid4vp] vp_token keys:", Object.keys(vpToken));
+      }
+      pidArr = vpToken?.[credId];
+      if (typeof pidArr === "string") pidArr = [pidArr];
+    } catch (e) {
+      let jweHeader = null;
+      try {
+        jweHeader = jose?.decodeProtectedHeader ? jose.decodeProtectedHeader(jwtCandidate) : null;
+      } catch {
+        jweHeader = null;
+      }
+      return res.status(400).json({
+        ok: false,
+        error: "Failed to decode dc_api.jwt response",
+        message: e?.message,
+        jweHeader,
+        hasEncPrivateKey: !!stored?.enc_private_jwk
+      });
+    }
+  }
 
   if (!Array.isArray(pidArr) || typeof pidArr[0] !== "string") {
     return res.status(400).json({
@@ -674,6 +1286,112 @@ app.post("/verifier/oid4vp/response", (req, res) => {
     verification: parsed.results,
     cbor_debug: parsed.debug
   });
+});
+
+/**
+ * POST /verifier/iso-mdoc/response
+ */
+app.post("/verifier/iso-mdoc/response", async (req, res) => {
+  const { request_id, dcResponse } = req.body || {};
+
+  if (!request_id || !stateStore.has(request_id)) {
+    return res.status(400).json({ ok: false, error: "Unknown request_id" });
+  }
+
+  const stored = stateStore.get(request_id);
+
+  // 1. Get raw payload
+  const payloadB64Url = typeof dcResponse === "string" ? dcResponse :
+    (dcResponse?.data?.response || dcResponse?.response);
+
+  if (!payloadB64Url) return res.status(400).json({ ok: false, error: "Missing response payload" });
+
+  try {
+    const responseBytes = b64urlToBuf(payloadB64Url);
+    const decodedTop = cborx.decode(responseBytes);
+
+    // 2. Parse 'dcapi' / 'edcapi' envelope
+    if (!Array.isArray(decodedTop) || decodedTop.length < 2) {
+      throw new Error("Invalid response structure");
+    }
+    const proto = decodedTop[0];
+    if (proto !== "dcapi" && proto !== "edcapi") {
+      throw new Error(`Unsupported envelope: ${proto}`);
+    }
+
+    const envelopeMap = decodedTop[1];
+    const getBytes = (v) => {
+      if (!v) return null;
+      if (v instanceof Map) return coseKeyToRawP256(v);
+      if (isBstr(v)) return toBuf(v);
+      if (v && typeof v === "object" && v.tag !== undefined && isBstr(v.value)) return toBuf(v.value);
+      return null;
+    };
+    const enc = getBytes(mapGet(envelopeMap, "enc") || mapGet(envelopeMap, "cenc"));
+    const ct = getBytes(mapGet(envelopeMap, "cipherText") || mapGet(envelopeMap, "ciphertext"));
+
+    if (!enc || !ct) throw new Error("Missing enc/cipherText");
+
+    // 3. Build HPKE info = CBOR(SessionTranscript)
+    const origin = stored?.origin || "http://localhost:3000";
+    const encInfoB64Url = stored?.encryption_info_bytes
+      ? bufToB64url(toBuf(stored.encryption_info_bytes))
+      : null;
+    if (!encInfoB64Url) throw new Error("Missing encryption_info_bytes");
+    const dcapiInfo = [encInfoB64Url, origin];
+    const dcapiInfoHash = crypto.createHash("sha256").update(cbor.encodeCanonical(dcapiInfo)).digest();
+    const sessionTranscript = [null, null, ["dcapi", dcapiInfoHash]];
+    const info = cbor.encodeCanonical(sessionTranscript);
+
+    // 4. HPKE open (DHKEM_P256 + HKDF_SHA256 + AES_128_GCM), aad = empty
+    const suite = await getHpkeSuite();
+    const recipientKey = await suite.kem.importKey("jwk", stored.private_key_jwk, false);
+    const encBuf = toBuf(enc);
+    const ctBuf = toBuf(ct);
+    const infoBuf = toBuf(info);
+    const plaintext = await suite.open(
+      {
+        recipientKey,
+        enc: encBuf.buffer.slice(encBuf.byteOffset, encBuf.byteOffset + encBuf.byteLength),
+        info: infoBuf.buffer.slice(infoBuf.byteOffset, infoBuf.byteOffset + infoBuf.byteLength)
+      },
+      ctBuf.buffer.slice(ctBuf.byteOffset, ctBuf.byteOffset + ctBuf.byteLength),
+      new Uint8Array()
+    );
+
+    // 5. Unwrap SessionData if present
+    let deviceResponse = cborx.decode(toBuf(plaintext));
+    if (Array.isArray(deviceResponse) && deviceResponse.length === 2 && typeof deviceResponse[0] === "number") {
+      deviceResponse = deviceResponse[1];
+      if (isBstr(deviceResponse)) deviceResponse = cborx.decode(toBuf(deviceResponse));
+    }
+
+    // 6. Reuse existing verification logic
+    const deviceResponseB64Url = bufToB64url(cbor.encodeCanonical(deviceResponse));
+    const parsed = parseMdocAndVerify(deviceResponseB64Url);
+    const portrait = extractPortrait(parsed.disclosed);
+
+    if (portrait.present && portrait.bytes) {
+      portraitStore.set(request_id, { bytes: portrait.bytes, mime: portrait.mimeGuess });
+    }
+
+    return res.json({
+      ok: true,
+      extracted: {
+        ...parsed.summary,
+        portrait: {
+          present: portrait.present,
+          mimeGuess: portrait.mimeGuess,
+          downloadUrl: portrait.present ? `/portrait/${request_id}` : null
+        }
+      },
+      verification: parsed.results
+    });
+
+  } catch (e) {
+    console.error("Decryption failed:", e);
+    return res.status(400).json({ ok: false, error: "Decryption failed", message: e.message });
+  }
 });
 
 app.listen(3000, () => {

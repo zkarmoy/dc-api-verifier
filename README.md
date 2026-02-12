@@ -36,6 +36,11 @@ Displays:
 - `issuing_country`
 - `expiry_date`
 
+### 🌐 ISO 18013-7 (DeviceRequest over DC API)
+- Alternate presentation format selectable in the UI
+- Generates an ISO 18013-5 DeviceRequest (CBOR, base64url)
+- Invokes the wallet through DC API with `protocol: "org-iso-mdoc"`
+
 ### 🏛 Certificate Viewer
 Displays issuer certificate details:
 - Subject (CN, O, OU, C)
@@ -112,6 +117,13 @@ http://localhost:3000
 - Optionally edit JSON manually
 - Click “Send to Wallet”
 
+### ISO 18013-7 (DeviceRequest via DC API)
+1. Switch to **Age Verification**
+2. Select **Presentation format → ISO 18013-7**
+3. Click **Create request**
+4. Use **Send to Wallet**
+5. Paste the response and submit
+
 ### 2️⃣ Wallet Interaction
 - Wallet displays requested attributes
 - User consents
@@ -187,6 +199,20 @@ In PID view:
 - No certificate trust chain validation
 - No HTTPS enforcement built-in
 - Designed for experimentation and interoperability
+
+---
+
+## ✅ Testing Notes
+
+### OID4VP (DC API)
+- Requires a browser with Digital Credentials API support
+- Some setups need HTTPS (use a local HTTPS proxy if required)
+- Chrome: enable `chrome://flags/#enable-digital-credentials` (if needed)
+
+### ISO 18013-7
+- Uses the same UI but different request/response endpoints
+- Requires Digital Credentials API support
+- Wallet support varies; expect differences across vendors
 
 ---
 
