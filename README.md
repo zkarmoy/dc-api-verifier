@@ -4,6 +4,11 @@ A lightweight playground for Digital Credentials API + OpenID4VP (unsigned) and 
 
 This is a demo and not production-ready.
 
+## Browser Support
+
+- **Chrome / Chromium browsers**: OpenID4VP (dc_api.jwt) and ISO 18013-7 (org-iso-mdoc) are supported.
+- **Safari**: only ISO 18013-7 (org-iso-mdoc). OpenID4VP over DC API is not supported and will fail to invoke the API.
+
 **Supported Protocols**
 1. OpenID4VP (unsigned) over DC API (`response_mode=dc_api.jwt`)
 2. ISO 18013-7 DeviceRequest over DC API (`protocol=org-iso-mdoc`)

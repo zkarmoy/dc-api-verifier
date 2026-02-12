@@ -6,13 +6,8 @@ const cors = require("cors");
 const crypto = require("crypto");
 const cbor = require("cbor");
 const cborx = require("cbor-x");
-let jose = null;
-try {
-  jose = require("jose");
-} catch {
-  jose = null;
-}
 let hpkeCore = null;
+let jose;
 
 const app = express();
 app.use(cors());
@@ -272,7 +267,12 @@ function isJwtLike(s) {
 
 async function decodeDcApiJwt(jwt, stored) {
   if (!jose) {
-    throw new Error("JOSE library not installed (npm i jose) for dc_api.jwt handling");
+      try {
+        jose = await import("jose");
+      } catch (e) {
+        console.error("Failed to import 'jose':", e);
+        throw new Error("JOSE library import failed: " + e.message);
+      }
   }
   const parts = jwt.split(".");
   if (parts.length === 5) {
@@ -1291,6 +1291,23 @@ app.post("/verifier/oid4vp/response", async (req, res) => {
         jweHeader = jose?.decodeProtectedHeader ? jose.decodeProtectedHeader(jwtCandidate) : null;
       } catch {
         jweHeader = null;
+      }
+      if (DEBUG) {
+        console.log("[oid4vp] decode error:", e?.message);
+        if (e?.stack) console.log("[oid4vp] decode error stack:", e.stack);
+        console.log("[oid4vp] jose available:", !!jose);
+        console.log("[oid4vp] node version:", process.version);
+        console.log("[oid4vp] webcrypto available:", !!globalThis.crypto?.subtle);
+        console.log("[oid4vp] has enc_private_jwk:", !!stored?.enc_private_jwk);
+        console.log("[oid4vp] state age ms:", stored?.createdAt ? Date.now() - stored.createdAt : null);
+        console.log("[oid4vp] request_id in state:", stored?.request_id);
+        console.log("[oid4vp] credId:", credId);
+        console.log("[oid4vp] jwt header:", jweHeader);
+        if (jwtCandidate) {
+          console.log("[oid4vp] jwtCandidate length:", jwtCandidate.length);
+          console.log("[oid4vp] jwtCandidate prefix:", jwtCandidate.slice(0, 60));
+          console.log("[oid4vp] jwtCandidate suffix:", jwtCandidate.slice(-60));
+        }
       }
       return res.status(400).json({
         ok: false,
