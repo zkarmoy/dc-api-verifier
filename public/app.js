@@ -5,11 +5,8 @@ const state = {
   lastResponse: null,
   generatedRequest: null,
   editedRequest: null,
-  requestedIdentifiers: [],
   protocol: "oid4vp",
-  stepStates: {},
-  issuerMetadata: null,
-  supportedCredentials: []
+  stepStates: {}
 };
 
 const STEP_LABELS = {
@@ -113,15 +110,19 @@ function renderRequest(data) {
   } : data));
   state.generatedRequest = requestObj;
   state.editedRequest = null;
-  $("requestId").textContent = data.request_id || "—";
-  $("nonce").textContent = data.state_hint?.nonce || "—";
-  $("state").textContent = data.state_hint?.state || "—";
+  const requestIdEl = $("requestId");
+  if (requestIdEl) requestIdEl.textContent = data.request_id || "—";
+  const nonceEl = $("nonce");
+  if (nonceEl) nonceEl.textContent = data.state_hint?.nonce || "—";
+  const stateEl = $("state");
+  if (stateEl) stateEl.textContent = data.state_hint?.state || "—";
   setRequestEditor(JSON.stringify(requestObj, null, 2));
   setRequestError("");
-  updateRequestedIdentifiers();
+  
   syncPidCheckboxesFromRequest(requestObj);
   syncAvCheckboxesFromRequest(requestObj);
   updateProtocolUI();
+  updateApplyEditsButtonState();
   setStepState(1, "success");
   setStepState(2, "active");
   setStepState(3, "pending");
@@ -249,295 +250,6 @@ function updateRequestedIdentifiers(docType) {
   state.requestedIdentifiers = getRequestedIdentifiersFromRequest(req, docType);
 }
 
-function hasCustomEditedRequest() {
-  const req = state.editedRequest;
-  const cred = req?.request?.data?.dcql_query?.credentials?.[0];
-  const docType = cred?.meta?.doctype_value;
-  return !!(docType && docType !== "eu.europa.ec.eudi.pid.1" && docType !== "eu.europa.ec.av.1");
-}
-
-function setIssuerMetaError(msg) {
-  const el = $("issuerMetaError");
-  if (!el) return;
-  if (!msg) {
-    el.classList.add("hidden");
-    el.textContent = "—";
-  } else {
-    el.textContent = msg;
-    el.classList.remove("hidden");
-  }
-}
-
-function pickDisplayName(display, fallback) {
-  if (Array.isArray(display)) {
-    const en = display.find((d) => d?.locale === "en");
-    if (en?.name) return en.name;
-    if (display[0]?.name) return display[0].name;
-  }
-  return fallback;
-}
-
-function extractCredentialConfigs(meta) {
-  const configs = meta?.credential_configurations_supported || {};
-  return Object.entries(configs).map(([key, cfg]) => {
-    const display = cfg?.credential_metadata?.display || cfg?.display;
-    const displayName = pickDisplayName(display, key);
-    const claims = Array.isArray(cfg?.credential_metadata?.claims)
-      ? cfg.credential_metadata.claims
-      : [];
-    const claimPaths = claims
-      .map((c) => (Array.isArray(c?.path) ? c.path : null))
-      .filter(Boolean);
-    const doctype = cfg?.doctype || null;
-    const vct = cfg?.vct || null;
-    const namespace = doctype || (claimPaths[0]?.[0] || null);
-    const attrs = claimPaths
-      .map((p) => (p.length > 0 ? p[p.length - 1] : null))
-      .filter((v) => typeof v === "string");
-    const mandatoryCount = claims.filter((c) => c?.mandatory).length;
-    return {
-      id: key,
-      format: cfg?.format || "unknown",
-      scope: cfg?.scope || "",
-      doctype,
-      vct,
-      namespace,
-      displayName,
-      claims,
-      attrs,
-      mandatoryCount
-    };
-  });
-}
-
-function renderIssuerSummary(meta) {
-  const el = $("issuerSummary");
-  if (!el) return;
-  if (!meta) {
-    el.classList.add("hidden");
-    el.innerHTML = "";
-    return;
-  }
-  const displayName = pickDisplayName(meta.display, meta.credential_issuer || "Issuer");
-  const issuer = meta.credential_issuer || "—";
-  const authServers = Array.isArray(meta.authorization_servers) ? meta.authorization_servers.length : 0;
-  const credEndpoint = meta.credential_endpoint || "—";
-  el.innerHTML = `
-    <h4>${displayName}</h4>
-    <div class="kv-grid">
-      <div class="kv-label">issuer</div>
-      <div class="kv-value"><code class="mono">${issuer}</code></div>
-      <div class="kv-label">auth servers</div>
-      <div class="kv-value">${authServers}</div>
-      <div class="kv-label">endpoint</div>
-      <div class="kv-value"><code class="mono">${credEndpoint}</code></div>
-    </div>
-  `;
-  el.classList.remove("hidden");
-}
-
-function renderCredentialCatalog(list) {
-  const container = $("credentialCatalog");
-  if (!container) return;
-  container.innerHTML = "";
-  if (!list || list.length === 0) {
-    container.classList.add("empty");
-    container.textContent = "No supported credentials found in the metadata.";
-    return;
-  }
-  container.classList.remove("empty");
-
-  list.forEach((cred) => {
-    const card = document.createElement("div");
-    card.className = "credential-card";
-
-    const name = document.createElement("div");
-    name.className = "credential-name";
-    name.textContent = cred.displayName;
-
-    const tags = document.createElement("div");
-    tags.className = "credential-tags";
-    const formatTag = document.createElement("span");
-    formatTag.className = "tag";
-    formatTag.textContent = cred.format;
-    tags.appendChild(formatTag);
-    if (cred.doctype) {
-      const d = document.createElement("span");
-      d.className = "tag";
-      d.textContent = cred.doctype;
-      tags.appendChild(d);
-    } else if (cred.vct) {
-      const v = document.createElement("span");
-      v.className = "tag";
-      v.textContent = cred.vct;
-      tags.appendChild(v);
-    }
-
-    const header = document.createElement("div");
-    header.className = "credential-card-header";
-    header.appendChild(name);
-    header.appendChild(tags);
-
-    const meta = document.createElement("div");
-    meta.className = "credential-meta";
-    const metaRows = [
-      ["scope", cred.scope || "—"],
-      ["claims", `${cred.attrs.length} (${cred.mandatoryCount} mandatory)`],
-      ["namespace", cred.namespace || "—"]
-    ];
-    metaRows.forEach(([label, value]) => {
-      const l = document.createElement("div");
-      l.textContent = label;
-      const v = document.createElement("div");
-      v.textContent = value;
-      meta.appendChild(l);
-      meta.appendChild(v);
-    });
-
-    const claims = document.createElement("div");
-    claims.className = "credential-claims";
-    const preview = cred.attrs.slice(0, 6);
-    preview.forEach((attr) => {
-      const chip = document.createElement("span");
-      chip.className = "chip";
-      chip.textContent = attr;
-      claims.appendChild(chip);
-    });
-    if (cred.attrs.length > preview.length) {
-      const more = document.createElement("span");
-      more.className = "chip";
-      more.textContent = `+${cred.attrs.length - preview.length} more`;
-      claims.appendChild(more);
-    }
-
-    const actions = document.createElement("div");
-    actions.className = "credential-actions";
-    const copyBtn = document.createElement("button");
-    copyBtn.className = "btn btn-ghost";
-    copyBtn.type = "button";
-    copyBtn.textContent = "Copy claims";
-    copyBtn.addEventListener("click", () => {
-      copyToClipboard(JSON.stringify(cred.claims, null, 2));
-    });
-
-    const useBtn = document.createElement("button");
-    useBtn.className = "btn btn-primary";
-    useBtn.type = "button";
-    useBtn.textContent = "Use for request";
-    useBtn.disabled = cred.format !== "mso_mdoc" || !cred.namespace;
-    useBtn.addEventListener("click", () => applyCredentialToRequest(cred));
-    actions.appendChild(copyBtn);
-    actions.appendChild(useBtn);
-
-    card.appendChild(header);
-    card.appendChild(meta);
-    card.appendChild(claims);
-    card.appendChild(actions);
-    container.appendChild(card);
-  });
-}
-
-function applyCredentialToRequest(cred) {
-  if (!cred || cred.format !== "mso_mdoc" || !cred.namespace) {
-    setIssuerMetaError("This credential format is not supported by the current request builder.");
-    return;
-  }
-  setIssuerMetaError("");
-  const attrs = cred.attrs.length ? cred.attrs : [];
-  const baseReq = getActiveRequest() || state.generatedRequest;
-  if (!baseReq) {
-    setIssuerMetaError("Create a request first so the server can generate keys, then apply this credential.");
-    return;
-  }
-
-  const req = JSON.parse(JSON.stringify(baseReq));
-  const target = req.request?.data?.dcql_query || req.dcql_query;
-  if (!target) {
-    setIssuerMetaError("Request JSON missing dcql_query. Create a new request first.");
-    return;
-  }
-  if (!Array.isArray(target.credentials)) target.credentials = [];
-  const credId = cred.id || "cred1";
-  const newCred = {
-    id: credId,
-    format: "mso_mdoc",
-    meta: { doctype_value: cred.doctype || cred.namespace },
-    claims: cred.claims?.length
-      ? cred.claims.map((c) => ({ path: c.path }))
-      : attrs.map((a) => ({ path: [cred.namespace, a] }))
-  };
-  target.credentials = [newCred];
-  target.credential_sets = [
-    {
-      options: [[credId]],
-      purpose: "Custom credential"
-    }
-  ];
-
-  state.editedRequest = req;
-  setRequestEditor(JSON.stringify(req, null, 2));
-  updateRequestedIdentifiers(cred.doctype || cred.namespace);
-
-  if (cred.doctype === "eu.europa.ec.eudi.pid.1") {
-    const pidRadio = document.querySelector('input[name="cred"][value="pid"]');
-    if (pidRadio) pidRadio.checked = true;
-    setPidAttrChecks(false);
-    attrs.forEach((a) => {
-      const box = ensurePidCheckbox(a);
-      if (box) box.checked = true;
-    });
-    updatePidAttrUI();
-    addLog("info", "Applied PID attributes from metadata");
-    return;
-  }
-
-  if (cred.doctype === "eu.europa.ec.av.1") {
-    const avRadio = document.querySelector('input[name="cred"][value="av"]');
-    if (avRadio) avRadio.checked = true;
-    setAvAttrChecks(false);
-    attrs.forEach((a) => {
-      const box = document.querySelector(`#avAttrsSection input[data-av-attr="${a}"]`);
-      if (box) box.checked = true;
-    });
-    updatePidAttrUI();
-    addLog("info", "Applied AV attributes from metadata");
-    return;
-  }
-
-  addLog("info", `Applied ${cred.displayName} (${cred.doctype || cred.namespace}) to request JSON`);
-}
-
-function importIssuerMetadata() {
-  try {
-    const raw = $("issuerMetadataInput")?.value?.trim();
-    if (!raw) throw new Error("Paste issuer metadata JSON to import.");
-    const meta = JSON.parse(raw);
-    state.issuerMetadata = meta;
-    const allCredentials = extractCredentialConfigs(meta);
-    const mdocCredentials = allCredentials.filter((c) => c.format === "mso_mdoc");
-    state.supportedCredentials = mdocCredentials;
-    renderIssuerSummary(meta);
-    renderCredentialCatalog(state.supportedCredentials);
-    setIssuerMetaError("");
-    if (mdocCredentials.length === 0) {
-      setIssuerMetaError("No mso_mdoc credentials found. This UI only imports mdoc credentials.");
-    }
-    addLog("info", `Imported ${mdocCredentials.length} mso_mdoc credential configurations`);
-  } catch (e) {
-    setIssuerMetaError(`Invalid metadata JSON: ${e.message}`);
-  }
-}
-
-function clearIssuerMetadata() {
-  state.issuerMetadata = null;
-  state.supportedCredentials = [];
-  const input = $("issuerMetadataInput");
-  if (input) input.value = "";
-  renderIssuerSummary(null);
-  renderCredentialCatalog([]);
-  setIssuerMetaError("");
-}
-
 function setPidAddHint(msg) {
   const el = $("pidAddHint");
   if (!el) return;
@@ -638,9 +350,10 @@ function applyRequestEdits() {
     state.editedRequest = parsed;
     setRequestEditor(JSON.stringify(parsed, null, 2));
     setRequestError("");
-    updateRequestedIdentifiers();
+    
     syncPidCheckboxesFromRequest(parsed);
     syncAvCheckboxesFromRequest(parsed);
+    updateApplyEditsButtonState();
     addLog("info", "Applied request edits");
   } catch (e) {
     setRequestError(`Invalid JSON: ${e.message}`);
@@ -653,22 +366,21 @@ function resetRequestEdits() {
   state.editedRequest = null;
   setRequestEditor(JSON.stringify(state.generatedRequest, null, 2));
   setRequestError("");
-  updateRequestedIdentifiers();
+  
   syncPidCheckboxesFromRequest(state.generatedRequest);
   syncAvCheckboxesFromRequest(state.generatedRequest);
+  updateApplyEditsButtonState();
   addLog("info", "Request JSON reset");
 }
 
-function prettyPrintRequest() {
-  try {
-    const parsed = parseRequestEditor();
-    setRequestEditor(JSON.stringify(parsed, null, 2));
-    setRequestError("");
-    syncPidCheckboxesFromRequest(parsed);
-    syncAvCheckboxesFromRequest(parsed);
-  } catch (e) {
-    setRequestError(`Invalid JSON: ${e.message}`);
-  }
+function updateApplyEditsButtonState() {
+  const btn = $("applyRequestEditsBtn");
+  if (!btn) return;
+  const base = state.generatedRequest ? JSON.stringify(state.generatedRequest, null, 2) : "";
+  const current = getRequestEditorText() || "";
+  const dirty = base && current.trim() !== base.trim();
+  btn.classList.toggle("btn-primary", dirty);
+  btn.classList.toggle("btn-ghost", !dirty);
 }
 
 function parseTextareaJson() {
@@ -992,15 +704,10 @@ function renderResults(data) {
   const extracted = data.extracted || {};
   const docKey = getDocKey(extracted.docType);
   const allClaims = extracted.disclosedAttributes || [];
-  updateRequestedIdentifiers(extracted.docType);
-  const requestedIds = state.requestedIdentifiers || [];
-  const effectiveRequested = requestedIds.length ? requestedIds : (extracted.requestedAttrs || []);
   const namespacedClaims = docKey
     ? allClaims.filter((c) => c.namespace === extracted.docType)
     : allClaims;
-  const filteredClaims = effectiveRequested.length
-    ? namespacedClaims.filter((c) => effectiveRequested.includes(c.elementIdentifier))
-    : namespacedClaims;
+  const filteredClaims = namespacedClaims;
 
   const claimsById = filteredClaims.reduce((acc, c) => {
     acc[c.elementIdentifier] = c.elementValue;
@@ -1016,9 +723,7 @@ function renderResults(data) {
   const portraitCard = $("portraitCard");
   portraitCard.classList.add("hidden");
   const portrait = extracted.portrait || {};
-  const requested = extracted.requestedAttrs || [];
-  const portraitRequested = requested.includes("portrait");
-  if (portrait.present && portraitRequested) {
+  if (portrait.present) {
     if (portrait.dataUrl) {
       portraitCard.innerHTML = `
         <div class="section"><strong>Portrait</strong></div>
@@ -1061,59 +766,6 @@ function renderResults(data) {
     }
   }
 
-  // Requested vs disclosed
-  const requestedEl = $("requestedAttrs");
-  if (requestedEl) {
-    requestedEl.innerHTML = "";
-    let requested = requestedIds.length ? requestedIds.slice() : (extracted.requestedAttrs || []);
-    if (!requested.length && isAv) {
-      requested = ["age_over_18", "age_over_21", "issuing_country", "expiry_date"];
-    }
-    if (docKey === "pid") {
-      requested = requested.filter((a) => FIELD_MAP.pid[a]);
-    }
-    if (docKey === "av") {
-      requested = requested.filter((a) => FIELD_MAP.av[a]);
-    }
-    if (!requested.length) {
-      requestedEl.innerHTML = `<div class="kv-label">Requested</div><div class="kv-value">—</div>`;
-    } else {
-      const map = docKey ? FIELD_MAP[docKey] : null;
-      requested.forEach((attr) => {
-        const label = document.createElement("div");
-        label.className = "kv-label";
-        label.textContent = map?.[attr]?.label || attr;
-        const value = document.createElement("div");
-        value.className = "kv-value mono";
-        const disclosed = filteredClaims.some((c) => c.elementIdentifier === attr);
-        value.textContent = disclosed ? "disclosed" : "not disclosed";
-        requestedEl.appendChild(label);
-        requestedEl.appendChild(value);
-      });
-    }
-  }
-
-  // Claims list
-  const claimsEl = $("claims");
-  claimsEl.innerHTML = "";
-  if (!allClaims.length) {
-    claimsEl.innerHTML = `<div class="kv-label">No disclosed attributes</div><div class="kv-value">—</div>`;
-  } else {
-    allClaims.forEach((a) => {
-      const label = document.createElement("div");
-      label.className = "kv-label";
-      const map = getDocKey(a.namespace) ? FIELD_MAP[getDocKey(a.namespace)] : null;
-      label.textContent = map?.[a.elementIdentifier]?.label || a.elementIdentifier;
-      const value = document.createElement("div");
-      value.className = "kv-value mono";
-      const norm = normalizeValue(a.elementValue);
-      if (norm.kind === "binary") value.textContent = norm.text;
-      else if (norm.kind === "bool") value.innerHTML = renderBoolChip(norm.value);
-      else value.textContent = norm.text;
-      claimsEl.appendChild(label);
-      claimsEl.appendChild(value);
-    });
-  }
 
   const verification = data.verification || {};
   const issuerBadge = badgeFor(verification.issuerAuthSignatureValid);
@@ -1269,7 +921,7 @@ function syncRequestClaimsFromPidCheckboxes() {
   cred.id = "pid1";
   cred.claims = attrs.map((a) => ({ path: ["eu.europa.ec.eudi.pid.1", a] }));
   setRequestEditor(JSON.stringify(req, null, 2));
-  updateRequestedIdentifiers("eu.europa.ec.eudi.pid.1");
+  
 }
 
 function syncRequestClaimsFromAvCheckboxes() {
@@ -1288,7 +940,7 @@ function syncRequestClaimsFromAvCheckboxes() {
   cred.id = "av1";
   cred.claims = attrs.map((a) => ({ path: ["eu.europa.ec.av.1", a] }));
   setRequestEditor(JSON.stringify(req, null, 2));
-  updateRequestedIdentifiers("eu.europa.ec.av.1");
+  
 }
 
 async function handleCreateRequest() {
@@ -1350,7 +1002,7 @@ async function handleInvokeDcApi() {
     }
     const req = getActiveRequest();
     if (!req) throw new Error("No request JSON available.");
-    updateRequestedIdentifiers(cred === "av" ? "eu.europa.ec.av.1" : "eu.europa.ec.eudi.pid.1");
+    
 
     if (protocol === "iso-mdoc") {
       if (!navigator.credentials || !navigator.credentials.get) {
@@ -1435,7 +1087,7 @@ async function handleSubmitResponse() {
     protocol = getSelectedProtocol();
     setStepState(3, "success");
     setStepState(4, "active");
-    updateRequestedIdentifiers(cred === "av" ? "eu.europa.ec.av.1" : "eu.europa.ec.eudi.pid.1");
+    
     const data = (protocol === "iso-mdoc")
       ? await postIsoResponse(requestId, dcResponse)
       : await postResponse(requestId, dcResponse);
@@ -1459,17 +1111,6 @@ async function handleSubmitResponse() {
   }
 }
 
-function handleFileUpload(ev) {
-  const file = ev.target.files?.[0];
-  if (!file) return;
-  const reader = new FileReader();
-  reader.onload = () => {
-    $("dcResponseInput").value = reader.result;
-    addLog("info", `Loaded ${file.name}`);
-  };
-  reader.readAsText(file);
-}
-
 function resetUI() {
   $("dcResponseInput").value = "";
   $("dcResponseInput").classList.remove("error");
@@ -1483,17 +1124,6 @@ function resetUI() {
   addLog("info", "UI reset");
 }
 
-function insertExample() {
-  $("dcResponseInput").value = JSON.stringify(
-    {
-      protocol: "openid4vp-v1-unsigned",
-      data: { vp_token: { pid1: ["<base64url-device-response>"] } }
-    },
-    null,
-    2
-  );
-}
-
 function copyLogs() {
   const lines = Array.from(document.querySelectorAll(".log-line")).map((l) => l.textContent);
   copyToClipboard(lines.join("\n"));
@@ -1502,9 +1132,6 @@ function copyLogs() {
 $("createRequestBtn").addEventListener("click", handleCreateRequest);
 $("invokeDcApiBtn").addEventListener("click", handleInvokeDcApi);
 $("submitResponseBtn").addEventListener("click", handleSubmitResponse);
-$("copyRequestIdBtn").addEventListener("click", () => {
-  if (state.request?.request_id) copyToClipboard(state.request.request_id);
-});
 $("copyRequestJsonBtn").addEventListener("click", () => {
   const text = getRequestEditorText();
   if (text) copyToClipboard(text);
@@ -1526,15 +1153,11 @@ $("copyIssuerBtn").addEventListener("click", () => {
   const cert = state.lastResponse?.extracted?.issuerCertificate?.issuer;
   if (cert) copyToClipboard(cert);
 });
-$("fileInput").addEventListener("change", handleFileUpload);
 $("resetBtn").addEventListener("click", resetUI);
-$("exampleBtn").addEventListener("click", insertExample);
 $("copyLogsBtn").addEventListener("click", copyLogs);
 $("applyRequestEditsBtn")?.addEventListener("click", applyRequestEdits);
 $("resetRequestEditsBtn")?.addEventListener("click", resetRequestEdits);
-$("prettyRequestBtn")?.addEventListener("click", prettyPrintRequest);
-$("importMetadataBtn")?.addEventListener("click", importIssuerMetadata);
-$("clearMetadataBtn")?.addEventListener("click", clearIssuerMetadata);
+$("requestJsonEditor")?.addEventListener("input", updateApplyEditsButtonState);
 
 document.querySelectorAll("input[name=cred]").forEach((el) => {
   el.addEventListener("change", updatePidAttrUI);

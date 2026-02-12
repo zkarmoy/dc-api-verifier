@@ -11,7 +11,6 @@ This is a demo and not production-ready.
 **Supported Credentials (mdoc)**
 1. PID `eu.europa.ec.eudi.pid.1`
 2. Age Verification `eu.europa.ec.av.1`
-3. Custom mdoc doctypes via issuer metadata import (mso_mdoc only)
 
 ## Features
 
@@ -26,7 +25,6 @@ This is a demo and not production-ready.
 
 **Credential Attribute Selection**
 - PID and AV attribute selectors
-- Custom mdoc claim sets imported from issuer metadata
 
 **Verification and Display**
 - Parses DeviceResponse and IssuerSigned items
@@ -62,6 +60,104 @@ Browser (UI)
 - DCQL request builder
 - Step-based flow UI
 
+## Protocols Overview
+
+This playground supports two different transport protocols that ultimately yield an mdoc `DeviceResponse`. They are similar at the cryptographic object level (ISO 18013-5) but differ in how the request is built and transported.
+
+### Digital Credentials API (DC API)
+
+DC API is the browser-facing transport used to communicate with a wallet. It provides an invocation interface from a web app and carries a request and response payload. In this project, DC API is the transport for both:
+
+- **OpenID4VP (unsigned)** using `response_mode=dc_api.jwt`.
+- **ISO 18013-7** using `protocol=org-iso-mdoc`.
+
+DC API does **not** define how credentials are structured; it is a transport mechanism. The credential format depends on the chosen protocol and format (here, `mso_mdoc`).
+
+### ISO 18013-5 (mdoc)
+
+ISO/IEC 18013-5 defines the mdoc data model and cryptographic structures:
+
+- `DeviceResponse` contains `documents`, each with `docType`, `issuerSigned`, and optionally `deviceSigned`.
+- `issuerSigned` includes:
+  - `issuerAuth` (COSE_Sign1 over the MSO)
+  - `nameSpaces` (arrays of `IssuerSignedItemBytes`)
+- `valueDigests` in the MSO allow per-item integrity verification.
+
+This verifier parses and extracts attributes from `IssuerSignedItemBytes` and verifies the issuer signature and value digests when present.
+
+### ISO 18013-7 (DeviceRequest over DC API)
+
+ISO 18013-7 describes how a verifier sends an **ISO 18013-5 DeviceRequest** via DC API and receives an encrypted response. The response is **not** a raw `DeviceResponse` but an encrypted envelope that must be decrypted before parsing the mdoc.
+
+In the Annex C DC API transport profile:
+
+- Request contains:
+  - `deviceRequest` (CBOR, base64url)
+  - `encryptionInfo` (CBOR, base64url) with nonce and verifier public key
+- Response contains:
+  - `EncryptedResponse = ["dcapi", { enc: bstr, cipherText: bstr }]`
+
+The response is encrypted using **HPKE single-shot** (RFC 9180) with:
+
+- **KEM**: DHKEM(P-256)
+- **KDF**: HKDF-SHA256
+- **AEAD**: AES-128-GCM
+
+The HPKE `info` is the CBOR-encoded `SessionTranscript` (see below) and `aad` is empty.
+
+### OpenID4VP (Unsigned) over DC API
+
+OpenID4VP is an OAuth-style protocol for requesting verifiable credentials from a wallet. In this playground:
+
+- The request is **unsigned** (dev mode), with a DCQL query describing requested claims.
+- The wallet responds using `response_mode=dc_api.jwt`.
+- The response can be:
+  - a JWE (encrypted) JWT, or
+  - a nested response containing `vp_token` entries.
+
+For mdoc, the `vp_token` value is a base64url-encoded CBOR `DeviceResponse` (or `Document`), which the verifier parses directly.
+
+### SessionTranscript (Annex C)
+
+The SessionTranscript binds the request and origin to the cryptographic session. In Annex C, it is:
+
+```
+SessionTranscript = [
+  null,
+  null,
+  ["dcapi", dcapiInfoHash]
+]
+
+dcapiInfo = [Base64EncryptionInfo, SerializedOrigin]
+
+SerializedOrigin = tstr
+
+dcapiInfoHash = SHA-256(CBOR(dcapiInfo))
+```
+
+- `Base64EncryptionInfo` is the base64url CBOR of `encryptionInfo`.
+- `SerializedOrigin` is the ASCII serialization of the origin.
+
+The **SessionTranscript** is the HPKE `info` input for ISO 18013-7 encryption/decryption.
+
+## OpenID4VP vs ISO 18013-7 (Key Differences)
+
+1. **Request Shape**
+- **OID4VP**: OAuth-style request with DCQL claims.
+- **ISO 18013-7**: `deviceRequest` (CBOR) + `encryptionInfo`.
+
+2. **Response Transport**
+- **OID4VP**: JWT container (`dc_api.jwt`), may be encrypted or nested.
+- **ISO 18013-7**: `EncryptedResponse` with HPKE ciphertext.
+
+3. **Crypto**
+- **OID4VP**: relies on the JWT container and credential format.
+- **ISO 18013-7**: always uses HPKE single-shot with AES-128-GCM.
+
+4. **Decryption**
+- **OID4VP**: decode JWT -> extract `vp_token` -> parse CBOR.
+- **ISO 18013-7**: HPKE decrypt -> obtain `DeviceResponse` -> parse CBOR.
+
 ## Getting Started
 
 1. Install dependencies
@@ -89,30 +185,18 @@ Some Digital Credential APIs require a secure context (https). Run behind a loca
 **Step 1: Build Request**
 - Pick protocol: OpenID4VP or ISO 18013-7
 - Pick credential type and attributes
-- Optional: paste issuer metadata to load supported mdoc credentials
 
 **Step 2: Send Request**
 - Use "Send to Wallet" to invoke the Digital Credentials API
 
 **Step 3: Receive Response**
-- Paste or upload the wallet response JSON
+- Paste the wallet response JSON
 
 **Step 4: Verify**
 - IssuerAuth and valueDigest verification are shown
 
 **Step 5: Attributes**
 - Extracted attributes and portrait are displayed
-
-## Testing With Issuer Metadata
-
-1. Paste issuer metadata JSON in the Supported Credentials section.
-2. Click **Import metadata**.
-3. Select a credential card and click **Use for request**.
-4. Create a request to get a fresh `request_id`, then send to wallet.
-
-Notes:
-- Only `mso_mdoc` credential configurations are imported.
-- Non‑PID/AV doctypes are applied directly to the request JSON.
 
 ## ISO 18013-5 Notes
 

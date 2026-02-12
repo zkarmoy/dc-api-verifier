@@ -21,7 +21,9 @@ app.use(express.static("public"));
 
 const DEBUG = String(process.env.DEBUG || "").toLowerCase() === "true" || process.env.DEBUG === "1";
 const log = (...args) => {
-  if (DEBUG) console.log(...args);
+  if (!DEBUG) return;
+  const normalized = args.map((arg) => (arg && typeof arg === "object" ? normalizeForLog(arg) : arg));
+  console.log(...normalized);
 };
 
 // -------------------- server log streaming (dev) --------------------
@@ -202,6 +204,36 @@ function tag0ToISOString(v) {
 
 function sha256Hex(bytes) {
   return crypto.createHash("sha256").update(bytes).digest("hex");
+}
+
+function normalizeForLog(value, seen = new WeakSet()) {
+  if (value === null || value === undefined) return value;
+  if (Buffer.isBuffer(value) || value instanceof Uint8Array) {
+    return `0x${Buffer.from(value).toString("hex")}`;
+  }
+  if (value && typeof value === "object" && value.type === "Buffer" && Array.isArray(value.data)) {
+    return `0x${Buffer.from(value.data).toString("hex")}`;
+  }
+  if (value instanceof Map) {
+    const out = {};
+    for (const [k, v] of value.entries()) {
+      out[k] = normalizeForLog(v, seen);
+    }
+    return out;
+  }
+  if (Array.isArray(value)) {
+    return value.map((v) => normalizeForLog(v, seen));
+  }
+  if (typeof value === "object") {
+    if (seen.has(value)) return "[Circular]";
+    seen.add(value);
+    const out = {};
+    for (const [k, v] of Object.entries(value)) {
+      out[k] = normalizeForLog(v, seen);
+    }
+    return out;
+  }
+  return value;
 }
 
 /**
@@ -873,7 +905,7 @@ function parseMdocAndVerify(deviceResponseOrDocumentB64Url) {
  */
 app.get("/verifier/oid4vp/request", (req, res) => {
   if (DEBUG) {
-    console.log("[request] query:", req.query);
+    console.log("[oid4vp] request query:", req.query);
   }
   const request_id = randomB64url(16);
   const sessionId = crypto.randomUUID();
@@ -886,7 +918,7 @@ app.get("/verifier/oid4vp/request", (req, res) => {
   const cred = String(req.query.cred || "pid").toLowerCase();
   const isAv = cred === "av";
   if (DEBUG) {
-    console.log("[request] cred selected:", cred);
+    console.log("[oid4vp] cred selected:", cred);
   }
 
   const doctype = isAv ? "eu.europa.ec.av.1" : "eu.europa.ec.eudi.pid.1";
@@ -902,8 +934,21 @@ app.get("/verifier/oid4vp/request", (req, res) => {
 
   const claims = requestedAttrs.map((a) => ({ path: [namespace, a] }));
 
-  const origin = "http://localhost:3000";
+  const originHeader = req.headers["origin"];
+  const forwardedProto = (req.headers["x-forwarded-proto"] || "").toString();
+  const forwardedHost = (req.headers["x-forwarded-host"] || "").toString();
+  const host = forwardedHost || req.headers.host || "localhost:3000";
+  const scheme = forwardedProto || (originHeader ? originHeader.split("://")[0] : "http");
+  const origin = originHeader || `${scheme}://${host}`;
   const clientId = `web-origin:${origin}`;
+  if (DEBUG) {
+    console.log("[oid4vp] origin:", origin);
+    console.log("[oid4vp] client_id:", clientId);
+    console.log("[oid4vp] doctype:", doctype);
+    console.log("[oid4vp] credId:", credId);
+    console.log("[oid4vp] requestedAttrs:", requestedAttrs);
+    console.log("[oid4vp] claims count:", claims.length);
+  }
   const requestData = {
     response_type: "vp_token",
     response_mode: "dc_api.jwt",
@@ -954,6 +999,10 @@ app.get("/verifier/oid4vp/request", (req, res) => {
     protocol: "openid4vp-v1-unsigned",
     data: requestData
   };
+  if (DEBUG) {
+    console.log("[oid4vp] request_id:", request_id);
+    console.log("[oid4vp] request payload:", request);
+  }
 
   stateStore.set(request_id, {
     createdAt: Date.now(),
@@ -967,6 +1016,7 @@ app.get("/verifier/oid4vp/request", (req, res) => {
     requestedAttrs,
     nonce,
     state,
+    origin,
     private_key_jwk: privateJwk,
     public_key_jwk: publicJwk,
     sessionId,
@@ -998,7 +1048,12 @@ app.get("/verifier/iso-mdoc/request", (req, res) => {
     console.log("[iso-mdoc request] cred selected:", cred);
   }
   const doctype = isAv ? "eu.europa.ec.av.1" : "eu.europa.ec.eudi.pid.1";
-  const origin = "http://localhost:3000";
+  const originHeader = req.headers["origin"];
+  const forwardedProto = (req.headers["x-forwarded-proto"] || "").toString();
+  const forwardedHost = (req.headers["x-forwarded-host"] || "").toString();
+  const host = forwardedHost || req.headers.host || "localhost:3000";
+  const scheme = forwardedProto || (originHeader ? originHeader.split("://")[0] : "http");
+  const origin = originHeader || `${scheme}://${host}`;
   const attrsParam = String(req.query.attrs || "").trim();
   const defaultPidAttrs = ["family_name", "given_name", "birth_date"];
   const defaultAvAttrs = ["age_over_18", "age_over_21", "issuing_country", "expiry_date"];
@@ -1066,9 +1121,9 @@ app.get("/verifier/iso-mdoc/request", (req, res) => {
   log("[iso-mdoc] encryptionInfo array ok:", encOk);
   log("[iso-mdoc] deviceRequest first16:", first16Hex(deviceRequestBytes));
   log("[iso-mdoc] encryptionInfo first16:", first16Hex(encryptionInfoBytes));
-  log("[iso-mdoc] DeviceRequest decoded:", decodedDeviceRequest);
-  log("[iso-mdoc] ItemsRequest decoded:", decodedItemsRequest);
-  log("[iso-mdoc] encryptionInfo decoded:", decodedEncryptionInfo);
+  log("[iso-mdoc] DeviceRequest decoded:", normalizeForLog(decodedDeviceRequest));
+  log("[iso-mdoc] ItemsRequest decoded:", normalizeForLog(decodedItemsRequest));
+  log("[iso-mdoc] encryptionInfo decoded:", normalizeForLog(decodedEncryptionInfo));
   decodeAndCompare(process.env.REF_DEVICE_REQUEST_B64URL, deviceRequestB64Url, "deviceRequest");
   decodeAndCompare(process.env.REF_ENCRYPTION_INFO_B64URL, encryptionInfoB64Url, "encryptionInfo");
 
@@ -1143,6 +1198,15 @@ app.get("/logs/stream", (req, res) => {
 app.post("/verifier/oid4vp/response", async (req, res) => {
   const { request_id, dcResponse } = req.body || {};
 
+  if (DEBUG) {
+    console.log("[oid4vp] response request_id:", request_id);
+    console.log("[oid4vp] response keys:", dcResponse && typeof dcResponse === "object" ? Object.keys(dcResponse) : []);
+    if (dcResponse?.protocol) console.log("[oid4vp] response protocol:", dcResponse.protocol);
+    if (dcResponse?.data && typeof dcResponse.data === "object") {
+      console.log("[oid4vp] response data keys:", Object.keys(dcResponse.data));
+    }
+  }
+
   if (!request_id || !stateStore.has(request_id)) {
     return res.status(400).json({
       ok: false,
@@ -1163,6 +1227,15 @@ app.post("/verifier/oid4vp/response", async (req, res) => {
   const jwtCandidate = typeof dcResponse?.data === "string"
     ? dcResponse.data
     : (typeof dcResponse?.data?.response === "string" ? dcResponse.data.response : null);
+  if (DEBUG) {
+    console.log("[oid4vp] jwtCandidate present:", !!jwtCandidate);
+    if (jwtCandidate) {
+      console.log("[oid4vp] jwtCandidate length:", jwtCandidate.length);
+      console.log("[oid4vp] jwtCandidate prefix:", jwtCandidate.slice(0, 48));
+      console.log("[oid4vp] jwtCandidate suffix:", jwtCandidate.slice(-48));
+      console.log("[oid4vp] jwtCandidate isJwtLike:", isJwtLike(jwtCandidate));
+    }
+  }
   if ((!pidArr || !Array.isArray(pidArr)) && jwtCandidate && isJwtLike(jwtCandidate)) {
     try {
       const decoded = await decodeDcApiJwt(jwtCandidate, stored);
@@ -1172,6 +1245,10 @@ app.post("/verifier/oid4vp/response", async (req, res) => {
           console.log("[oid4vp] jwe header:", decoded.protectedHeader);
         }
         const text = Buffer.from(decoded.plaintext).toString("utf8");
+        if (DEBUG) {
+          console.log("[oid4vp] jwe plaintext length:", text.length);
+          console.log("[oid4vp] jwe plaintext prefix:", text.slice(0, 120));
+        }
         try {
           payloadObj = JSON.parse(text);
         } catch {
@@ -1203,6 +1280,11 @@ app.post("/verifier/oid4vp/response", async (req, res) => {
       }
       pidArr = vpToken?.[credId];
       if (typeof pidArr === "string") pidArr = [pidArr];
+      if (DEBUG) {
+        console.log("[oid4vp] credId:", credId);
+        console.log("[oid4vp] vp_token[credId] type:", Array.isArray(pidArr) ? "array" : typeof pidArr);
+        console.log("[oid4vp] vp_token[credId] length:", Array.isArray(pidArr) ? pidArr.length : 0);
+      }
     } catch (e) {
       let jweHeader = null;
       try {
@@ -1230,8 +1312,9 @@ app.post("/verifier/oid4vp/response", async (req, res) => {
   const payloadB64Url = pidArr[0];
   const normalized = normalizeB64Url(payloadB64Url);
 
-  log("\n=== DC API response received ===");
+  log("\n=== OID4VP response received ===");
   log("request_id:", request_id);
+  log("credId:", credId);
   log(`vp_token.${credId}[0] length:`, payloadB64Url.length);
   log("prefix:", payloadB64Url.slice(0, 48));
   log("suffix:", payloadB64Url.slice(-48));
