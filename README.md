@@ -39,6 +39,7 @@ This is a demo and not production-ready.
 - Editable request JSON
 - CBOR debug section
 - Server logs streamed into UI console
+- Annex C / HPKE debug logs (ISO 18013-7)
 
 ## Architecture
 
@@ -130,6 +131,26 @@ IssuerSignedItemBytes = Tag(24, embedded CBOR)
 
 **DeviceAuth**
 Device signature verification requires the correct SessionTranscript. This demo parses DeviceAuth but does not fully verify it unless transcript bytes are provided.
+
+## Debugging (ISO 18013-7 / Annex C)
+
+The UI console mirrors backend logs. For ISO 18013-7 (DC API / `org-iso-mdoc`), the server emits detailed Annex C debugging output, including:
+
+- `enc` (ephemeral public key) hex
+- `cipherText` hex
+- `dcapiInfo` CBOR hex
+- `dcapiInfoHash` hex
+- `SessionTranscript` (info) CBOR hex
+- `aad` (empty) hex
+- Origin and encryptionInfo (b64url)
+- HPKE intermediate secrets when available:
+  - `sharedSecret`
+  - `aeadKey`
+  - `baseNonce`
+
+These logs appear in the UI console as `[iso-mdoc][annexC] ...` lines.
+
+Note: Some HPKE internals may not be exposed by the library. In those cases, the server logs indicate the value is unavailable.
 
 ## Project Structure
 

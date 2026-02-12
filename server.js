@@ -1349,15 +1349,84 @@ app.post("/verifier/iso-mdoc/response", async (req, res) => {
     const encBuf = toBuf(enc);
     const ctBuf = toBuf(ct);
     const infoBuf = toBuf(info);
-    const plaintext = await suite.open(
-      {
+    const encArray = encBuf.buffer.slice(encBuf.byteOffset, encBuf.byteOffset + encBuf.byteLength);
+    const ctArray = ctBuf.buffer.slice(ctBuf.byteOffset, ctBuf.byteOffset + ctBuf.byteLength);
+    const infoArray = infoBuf.buffer.slice(infoBuf.byteOffset, infoBuf.byteOffset + infoBuf.byteLength);
+    const aad = new Uint8Array();
+
+    const annexCEnabled = true;
+    const annexCSecrets = true;
+    const toHex = (v) => (v ? Buffer.from(v).toString("hex") : "");
+    const toU8 = (v) => {
+      if (!v) return null;
+      if (v instanceof Uint8Array) return v;
+      if (Buffer.isBuffer(v)) return new Uint8Array(v.buffer, v.byteOffset, v.byteLength);
+      if (v instanceof ArrayBuffer) return new Uint8Array(v);
+      if (ArrayBuffer.isView(v)) return new Uint8Array(v.buffer, v.byteOffset, v.byteLength);
+      return null;
+    };
+
+    if (annexCEnabled) {
+      const dcapiInfoCbor = cbor.encodeCanonical(dcapiInfo);
+      console.log("[iso-mdoc][annexC] enc hex:", toHex(encBuf));
+      console.log("[iso-mdoc][annexC] ct hex:", toHex(ctBuf));
+      console.log("[iso-mdoc][annexC] dcapiInfo (CBOR) hex:", toHex(dcapiInfoCbor));
+      console.log("[iso-mdoc][annexC] dcapiInfoHash hex:", toHex(dcapiInfoHash));
+      console.log("[iso-mdoc][annexC] SessionTranscript (CBOR) hex:", toHex(infoBuf));
+      console.log("[iso-mdoc][annexC] aad hex:", "");
+      console.log("[iso-mdoc][annexC] origin:", origin);
+      console.log("[iso-mdoc][annexC] encryptionInfo b64url:", encInfoB64Url);
+    }
+
+    // Use recipient context so we can introspect derived secrets (dev only)
+    let plaintext;
+    try {
+      const recipientContext = await suite.createRecipientContext({
         recipientKey,
-        enc: encBuf.buffer.slice(encBuf.byteOffset, encBuf.byteOffset + encBuf.byteLength),
-        info: infoBuf.buffer.slice(infoBuf.byteOffset, infoBuf.byteOffset + infoBuf.byteLength)
-      },
-      ctBuf.buffer.slice(ctBuf.byteOffset, ctBuf.byteOffset + ctBuf.byteLength),
-      new Uint8Array()
-    );
+        enc: encArray,
+        info: infoArray
+      });
+
+      if (annexCEnabled) {
+        let sharedSecret = null;
+        if (annexCSecrets && typeof suite?.kem?.decap === "function") {
+          try {
+            sharedSecret = await suite.kem.decap(recipientKey, encArray);
+            console.log("[iso-mdoc][annexC] sharedSecret:", toHex(toU8(sharedSecret)));
+          } catch (e) {
+            console.log("[iso-mdoc][annexC] sharedSecret unavailable:", e?.message);
+          }
+        }
+
+        const ctx = recipientContext?._ctx || recipientContext?.ctx || null;
+        const baseNonce = ctx?._baseNonce || ctx?.baseNonce || ctx?._nonce || ctx?.nonce || null;
+        const aeadCtx = ctx?._aeadCtx || ctx?._aead || ctx?.aead || null;
+        const keyBytes =
+          toU8(aeadCtx?._key) ||
+          toU8(aeadCtx?.key) ||
+          toU8(aeadCtx?._rawKey) ||
+          toU8(aeadCtx?.rawKey);
+
+        if (annexCSecrets && keyBytes) {
+          console.log("[iso-mdoc][annexC] aeadKey:", toHex(keyBytes));
+        } else if (annexCSecrets) {
+          console.log("[iso-mdoc][annexC] aeadKey unavailable (library internal)");
+        }
+        if (baseNonce) {
+          console.log("[iso-mdoc][annexC] baseNonce:", toHex(toU8(baseNonce)));
+        }
+      }
+
+      plaintext = await recipientContext.open(ctArray, aad);
+    } catch (e) {
+      // Fallback to one-shot open if context creation fails
+      if (annexCEnabled) console.log("[iso-mdoc][annexC] recipient context failed, fallback to suite.open:", e?.message);
+      plaintext = await suite.open(
+        { recipientKey, enc: encArray, info: infoArray },
+        ctArray,
+        aad
+      );
+    }
 
     // 5. Unwrap SessionData if present
     let deviceResponse = cborx.decode(toBuf(plaintext));
