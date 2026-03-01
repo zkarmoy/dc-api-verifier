@@ -4,7 +4,11 @@
   "private": true,
   "main": "server.js",
   "scripts": {
-    "start": "node server.js"
+    "start": "node server.js",
+    "test": "node --test",
+    "test:watch": "node --test --watch",
+    "test:ui": "node --test test/ui-logic.test.js",
+    "test:ui:watch": "node --test --watch test/ui-logic.test.js"
   },
   "dependencies": {
     "@hpke/core": "^1.7.5",

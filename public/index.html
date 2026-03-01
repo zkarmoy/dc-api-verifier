@@ -27,13 +27,13 @@
           <div class="badge badge-warn">Required</div>
         </div>
         <div id="protocolSection" class="section">
-          <div class="segmented" role="group" aria-label="Protocol">
+          <div class="segmented" role="group" aria-label="Protocol" data-testid="protocol-selector">
             <label class="seg">
-              <input type="radio" name="protocol" value="oid4vp" checked />
+              <input type="radio" name="protocol" value="oid4vp" checked data-testid="protocol-oid4vp" />
               <span>OpenID4VP 1.0 (unsigned)</span>
             </label>
             <label class="seg">
-              <input type="radio" name="protocol" value="iso-mdoc" />
+              <input type="radio" name="protocol" value="iso-mdoc" data-testid="protocol-iso-mdoc" />
               <span>ISO 18013-7 (DeviceRequest)</span>
             </label>
           </div>
@@ -44,7 +44,7 @@
       <section class="stepper" aria-label="Flow progress">
         <div class="stepper-item pending" data-step="1"><span class="stepper-circle">1</span><span class="stepper-label">Build</span></div>
         <div class="stepper-line"></div>
-        <div class="stepper-item pending" data-step="2"><span class="stepper-circle">2</span><span class="stepper-label">Send</span></div>
+        <div class="stepper-item pending" data-step="2"><span class="stepper-circle">2</span><span class="stepper-label">QR</span></div>
         <div class="stepper-line"></div>
         <div class="stepper-item pending" data-step="3"><span class="stepper-circle">3</span><span class="stepper-label">Receive</span></div>
         <div class="stepper-line"></div>
@@ -68,22 +68,22 @@
               <div class="card-header">
                 <h2>Request</h2>
                 <div class="actions">
-                  <button id="createRequestBtn" class="btn btn-primary">Create request</button>
+                  <button id="createRequestBtn" class="btn btn-primary" data-testid="create-request-btn">Create request</button>
                 </div>
               </div>
 
-            <div class="segmented" role="group" aria-label="Credential type">
+            <div class="segmented" role="group" aria-label="Credential type" data-testid="credential-selector">
               <label class="seg">
-                <input type="radio" name="cred" value="pid" checked />
+                <input type="radio" name="cred" value="pid" checked data-testid="cred-pid" />
                 <span>PID (eu.europa.ec.eudi.pid.1)</span>
               </label>
               <label class="seg">
-                <input type="radio" name="cred" value="av" />
+                <input type="radio" name="cred" value="av" data-testid="cred-av" />
                 <span>Age Verification (eu.europa.ec.av.1)</span>
               </label>
             </div>
 
-            <div id="pidAttrsSection" class="section">
+            <div id="pidAttrsSection" class="section" data-testid="pid-attrs-section">
               <div class="section-header">
                 <h3>PID Attributes</h3>
                 <div class="actions">
@@ -91,12 +91,26 @@
                   <button id="pidSelectNoneBtn" class="btn btn-ghost" type="button">Select none</button>
                 </div>
               </div>
-              <div class="input-row">
-                <input id="pidAddInput" class="input" type="text" placeholder="Add PID attribute (e.g., birth_place)" />
-                <button id="pidAddBtn" class="btn btn-ghost" type="button">+</button>
+              <div class="selection-summary-row">
+                <span id="pidSelectedSummary" class="selection-summary" aria-live="polite" data-testid="pid-selected-summary">3 selected of 7</span>
               </div>
+              <div class="input-row">
+                <input id="pidAddInput" class="input" type="text" placeholder="Add attribute (e.g., birth_place or nationality,expiry_date)" list="pidAttrSuggestions" />
+                <button id="pidAddBtn" class="btn btn-ghost" type="button">Add</button>
+              </div>
+              <datalist id="pidAttrSuggestions">
+                <option value="family_name"></option>
+                <option value="given_name"></option>
+                <option value="birth_date"></option>
+                <option value="birth_place"></option>
+                <option value="nationality"></option>
+                <option value="issuing_authority"></option>
+                <option value="issuing_country"></option>
+                <option value="expiry_date"></option>
+              </datalist>
+              <div class="hint">Tip: press Enter to add. You can add multiple attributes separated by commas.</div>
               <div id="pidAddHint" class="hint hidden">—</div>
-              <div class="checkbox-grid" role="group" aria-label="PID attribute selector">
+              <div class="checkbox-grid" role="group" aria-label="PID attribute selector" data-testid="pid-attr-grid">
                 <label class="check">
                   <input type="checkbox" data-attr="family_name" checked />
                   <span>family_name</span>
@@ -126,10 +140,10 @@
                   <span>expiry_date</span>
                 </label>
               </div>
-              <div id="pidAttrHint" class="hint">Select at least one attribute to continue.</div>
+              <div id="pidAttrHint" class="hint hidden" role="status" aria-live="polite">Select at least one attribute to continue.</div>
             </div>
 
-            <div id="avAttrsSection" class="section hidden">
+            <div id="avAttrsSection" class="section hidden" data-testid="av-attrs-section">
               <div class="section-header">
                 <h3>Age Verification Attributes</h3>
                 <div class="actions">
@@ -137,7 +151,10 @@
                   <button id="avSelectNoneBtn" class="btn btn-ghost" type="button">Select none</button>
                 </div>
               </div>
-              <div class="checkbox-grid" role="group" aria-label="Age verification attribute selector">
+              <div class="selection-summary-row">
+                <span id="avSelectedSummary" class="selection-summary" aria-live="polite" data-testid="av-selected-summary">2 selected of 4</span>
+              </div>
+              <div class="checkbox-grid" role="group" aria-label="Age verification attribute selector" data-testid="av-attr-grid">
                 <label class="check">
                   <input type="checkbox" data-av-attr="age_over_18" checked />
                   <span>age_over_18</span>
@@ -155,7 +172,7 @@
                   <span>expiry_date</span>
                 </label>
               </div>
-              <div id="avAttrHint" class="hint">Select at least one attribute to continue.</div>
+              <div id="avAttrHint" class="hint hidden" role="status" aria-live="polite">Select at least one attribute to continue.</div>
             </div>
 
             <div class="section">
@@ -177,22 +194,22 @@
 
         <section class="col">
           <div class="step pending" data-step="2">
-            <div class="step-header">
-              <div class="step-badge">2</div>
-              <div>
-                <div class="step-title">Send Request</div>
-                <div class="step-desc">Invoke the wallet using DC API.</div>
+              <div class="step-header">
+                <div class="step-badge">2</div>
+                <div>
+                <div class="step-title">Generate QR Code</div>
+                <div class="step-desc">Create a device engagement QR code for wallet flow.</div>
+                </div>
+                <div class="step-status">Pending</div>
               </div>
-              <div class="step-status">Pending</div>
-            </div>
-            <div class="step-content card">
-              <div class="card-header">
-                <h2>Send to Wallet</h2>
+              <div class="step-content card">
+                <div class="card-header">
+                <h2>Device Engagement</h2>
                 <div class="actions">
-                  <button id="invokeDcApiBtn" class="btn btn-primary">Send to Wallet</button>
+                  <button id="invokeDcApiBtn" class="btn btn-primary">Generate QR Code</button>
                 </div>
               </div>
-              <div class="hint">Requires a compatible browser wallet.</div>
+              <div class="hint">Generates a QR code payload for device engagement.</div>
             </div>
           </div>
 
@@ -214,8 +231,6 @@
               </div>
 
             <div id="errorBanner" class="error-banner hidden">—</div>
-
-            <label for="dcResponseInput">Paste dcResponse JSON here</label>
             <textarea id="dcResponseInput" class="textarea" rows="10" placeholder='{"protocol":"openid4vp-v1-unsigned","data":{"vp_token":{"pid1":["..."]}}}'></textarea>
             </div>
           </div>
@@ -339,6 +354,14 @@
         <div class="card-header">
           <h2>Console</h2>
           <div class="actions">
+            <label class="toggle-row compact">
+              <input id="verboseLogsToggle" type="checkbox" />
+              <span>Verbose logs</span>
+            </label>
+            <label class="toggle-row compact">
+              <input id="payloadLogsToggle" type="checkbox" />
+              <span>Payload diagnostics</span>
+            </label>
             <button id="copyLogsBtn" class="btn btn-ghost">Copy logs</button>
           </div>
         </div>
@@ -347,6 +370,7 @@
     </div>
 
     <script src="https://cdn.jsdelivr.net/npm/jpx@0.3.1/jpx.min.js"></script>
+    <script src="ui-logic.js"></script>
     <script src="app.js"></script>
   </body>
 </html>

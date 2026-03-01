@@ -1,4 +1,7 @@
 const $ = (id) => document.getElementById(id);
+const UiLogic = window.UiLogic || {};
+const PID_ATTR_SELECTOR = "#pidAttrsSection input[type=checkbox][data-attr]";
+const AV_ATTR_SELECTOR = "#avAttrsSection input[type=checkbox][data-av-attr]";
 
 const state = {
   request: null,
@@ -6,7 +9,11 @@ const state = {
   generatedRequest: null,
   editedRequest: null,
   protocol: "oid4vp",
-  stepStates: {}
+  stepStates: {},
+  debug: {
+    verbose: false,
+    payloads: false
+  }
 };
 
 const STEP_LABELS = {
@@ -56,12 +63,94 @@ function addLog(level, msg) {
   log.scrollTop = log.scrollHeight;
 }
 
+function summarizeForLog(value) {
+  if (value === null || value === undefined) return value;
+  if (typeof value === "string") {
+    if (value.length > 180) return `${value.slice(0, 180)}… (${value.length} chars)`;
+    return value;
+  }
+  if (Array.isArray(value)) return value.slice(0, 8).map((v) => summarizeForLog(v));
+  if (typeof value === "object") {
+    const out = {};
+    Object.keys(value).slice(0, 12).forEach((k) => {
+      out[k] = summarizeForLog(value[k]);
+    });
+    return out;
+  }
+  return value;
+}
+
+function logWithContext(level, msg, details, opts = {}) {
+  if (!details) {
+    addLog(level, msg);
+    return;
+  }
+  const force = opts.force === true;
+  const include = force || state.debug.verbose || (opts.payload === true && state.debug.payloads);
+  if (!include) {
+    addLog(level, msg);
+    return;
+  }
+  const normalized = opts.payload === true ? summarizeForLog(details) : details;
+  let suffix = "";
+  try {
+    suffix = ` | ${JSON.stringify(normalized)}`;
+  } catch {
+    suffix = " | [unserializable details]";
+  }
+  addLog(level, `${msg}${suffix}`);
+}
+
+function setDebugOption(key, value) {
+  state.debug[key] = Boolean(value);
+  localStorage.setItem(`debug:${key}`, state.debug[key] ? "1" : "0");
+}
+
+function loadDebugOptions() {
+  state.debug.verbose = localStorage.getItem("debug:verbose") === "1";
+  state.debug.payloads = localStorage.getItem("debug:payloads") === "1";
+  const verboseToggle = $("verboseLogsToggle");
+  const payloadToggle = $("payloadLogsToggle");
+  if (verboseToggle) verboseToggle.checked = state.debug.verbose;
+  if (payloadToggle) payloadToggle.checked = state.debug.payloads;
+}
+
+function wireDebugOptionControls() {
+  $("verboseLogsToggle")?.addEventListener("change", (e) => {
+    setDebugOption("verbose", Boolean(e.target.checked));
+    logWithContext("info", "Verbose logging updated", { verbose: state.debug.verbose }, { force: true });
+  });
+  $("payloadLogsToggle")?.addEventListener("change", (e) => {
+    setDebugOption("payloads", Boolean(e.target.checked));
+    logWithContext("info", "Payload diagnostics updated", { payloads: state.debug.payloads }, { force: true });
+  });
+}
+
+function wireGlobalErrorLogging() {
+  window.addEventListener("error", (event) => {
+    logWithContext("error", "Unhandled error", {
+      message: event.message,
+      source: event.filename,
+      line: event.lineno,
+      col: event.colno
+    }, { force: true });
+  });
+  window.addEventListener("unhandledrejection", (event) => {
+    const reason = event.reason;
+    logWithContext("error", "Unhandled promise rejection", {
+      message: reason?.message || String(reason),
+      name: reason?.name || "Error"
+    }, { force: true });
+  });
+}
+
 function connectServerLogs() {
   if (!window.EventSource) {
     addLog("warn", "Server log stream not supported in this browser.");
     return;
   }
   const es = new EventSource("/logs/stream");
+  logWithContext("info", "Connected to server log stream", { endpoint: "/logs/stream" });
   es.onmessage = (ev) => {
     try {
       const entry = JSON.parse(ev.data);
@@ -74,7 +163,7 @@ function connectServerLogs() {
   es.onerror = () => {
     if (!state.serverLogError) {
       state.serverLogError = true;
-      addLog("warn", "Server log stream disconnected.");
+      logWithContext("warn", "Server log stream disconnected.", { endpoint: "/logs/stream" }, { force: true });
     }
   };
 }
@@ -82,9 +171,9 @@ function connectServerLogs() {
 async function copyToClipboard(text) {
   try {
     await navigator.clipboard.writeText(text);
-    addLog("info", "Copied to clipboard");
+    logWithContext("info", "Copied to clipboard", { chars: text?.length || 0 }, { payload: true });
   } catch (e) {
-    addLog("error", "Failed to copy");
+    logWithContext("error", "Failed to copy", { message: e?.message || "unknown" }, { force: true });
   }
 }
 
@@ -110,6 +199,11 @@ function renderRequest(data) {
   } : data));
   state.generatedRequest = requestObj;
   state.editedRequest = null;
+  logWithContext("info", "Request rendered", {
+    requestId: data?.request_id,
+    protocol: requestObj?.request?.protocol || requestObj?.protocol,
+    hasDcql: Boolean(requestObj?.request?.data?.dcql_query || requestObj?.dcql_query)
+  });
   const requestIdEl = $("requestId");
   if (requestIdEl) requestIdEl.textContent = data.request_id || "—";
   const nonceEl = $("nonce");
@@ -245,11 +339,6 @@ function getRequestedIdentifiersFromRequest(requestObj, docType) {
   return [];
 }
 
-function updateRequestedIdentifiers(docType) {
-  const req = getActiveRequest();
-  state.requestedIdentifiers = getRequestedIdentifiersFromRequest(req, docType);
-}
-
 function setPidAddHint(msg) {
   const el = $("pidAddHint");
   if (!el) return;
@@ -263,7 +352,7 @@ function setPidAddHint(msg) {
 }
 
 function ensurePidCheckbox(attr) {
-  const grid = document.querySelector(".checkbox-grid");
+  const grid = $("pidAttrsSection")?.querySelector(".checkbox-grid");
   if (!grid) return null;
   let input = grid.querySelector(`input[data-attr="${attr}"]`);
   if (input) return input;
@@ -277,6 +366,7 @@ function ensurePidCheckbox(attr) {
   label.appendChild(input);
   label.appendChild(span);
   grid.appendChild(label);
+  input.addEventListener("change", updateSelectionState);
   input.addEventListener("change", updatePidAttrUI);
   return input;
 }
@@ -284,7 +374,7 @@ function ensurePidCheckbox(attr) {
 function syncPidCheckboxesFromRequest(requestObj) {
   if (!requestObj) return;
   const ids = getRequestedIdentifiersFromRequest(requestObj, "eu.europa.ec.eudi.pid.1");
-  const boxes = Array.from(document.querySelectorAll("#pidAttrsSection input[type=checkbox][data-attr]"));
+  const boxes = Array.from(document.querySelectorAll(PID_ATTR_SELECTOR));
   boxes.forEach((b) => { b.checked = ids.includes(b.dataset.attr); });
   ids.forEach((id) => {
     const box = ensurePidCheckbox(id);
@@ -295,7 +385,7 @@ function syncPidCheckboxesFromRequest(requestObj) {
 function syncAvCheckboxesFromRequest(requestObj) {
   if (!requestObj) return;
   const ids = getRequestedIdentifiersFromRequest(requestObj, "eu.europa.ec.av.1");
-  const boxes = Array.from(document.querySelectorAll("#avAttrsSection input[type=checkbox][data-av-attr]"));
+  const boxes = Array.from(document.querySelectorAll(AV_ATTR_SELECTOR));
   boxes.forEach((b) => { b.checked = ids.includes(b.dataset.avAttr); });
 }
 
@@ -304,44 +394,87 @@ function addPidAttributeFromInput() {
   if (!input) return;
   const raw = input.value.trim();
   if (!raw) return;
-  if (!/^[a-zA-Z0-9_]+$/.test(raw)) {
-    setPidAddHint("Invalid attribute name. Use letters, numbers, underscore.");
+
+  const candidates = raw
+    .split(",")
+    .map((v) => v.trim())
+    .filter(Boolean)
+    .map((v) => v.toLowerCase());
+
+  if (!candidates.length) return;
+
+  const invalid = candidates.filter((v) => !/^[a-zA-Z0-9_]+$/.test(v));
+  if (invalid.length) {
+    setPidAddHint(`Invalid: ${invalid.join(", ")}. Use letters, numbers, underscore.`);
     return;
   }
 
-  let req;
-  try {
-    req = parseRequestEditor();
-  } catch (e) {
-    setPidAddHint("Fix request JSON before adding attributes.");
-    return;
+  const added = [];
+  const existing = [];
+  candidates.forEach((attr) => {
+    const box = ensurePidCheckbox(attr);
+    if (!box) return;
+    if (box.checked) {
+      existing.push(attr);
+      return;
+    }
+    box.checked = true;
+    added.push(attr);
+  });
+
+  if (added.length && state.generatedRequest && !state.editedRequest && getSelectedProtocol() === "oid4vp") {
+    syncRequestClaimsFromPidCheckboxes();
   }
 
-  const ids = getRequestedIdentifiersFromRequest(req, "eu.europa.ec.eudi.pid.1");
-  if (ids.includes(raw)) {
-    setPidAddHint("Attribute already added.");
-    addLog("info", `Attribute already added: ${raw}`);
-    input.value = "";
-    return;
-  }
-
-  if (!req.dcql_query) req.dcql_query = {};
-  if (!Array.isArray(req.dcql_query.credentials)) req.dcql_query.credentials = [];
-  let cred = req.dcql_query.credentials.find((c) => c?.meta?.doctype_value === "eu.europa.ec.eudi.pid.1");
-  if (!cred) {
-    cred = { id: "pid1", format: "mso_mdoc", meta: { doctype_value: "eu.europa.ec.eudi.pid.1" }, claims: [] };
-    req.dcql_query.credentials.unshift(cred);
-  }
-  if (!Array.isArray(cred.claims)) cred.claims = [];
-  cred.claims.push({ path: ["eu.europa.ec.eudi.pid.1", raw] });
-
-  state.editedRequest = req;
-  setRequestEditor(JSON.stringify(req, null, 2));
-  updateRequestedIdentifiers("eu.europa.ec.eudi.pid.1");
-  syncPidCheckboxesFromRequest(req);
+  updateSelectionState();
   setPidAddHint("");
   input.value = "";
-  addLog("info", `Added PID attribute: ${raw}`);
+  if (added.length) {
+    addLog("info", `Added PID attributes: ${added.join(", ")}`);
+    setPidAddHint(`Added: ${added.join(", ")}`);
+  } else if (existing.length) {
+    setPidAddHint(`Already selected: ${existing.join(", ")}`);
+  }
+}
+
+function updatePidAddInputState() {
+  const input = $("pidAddInput");
+  const btn = $("pidAddBtn");
+  if (!input || !btn) return;
+
+  const raw = input.value.trim();
+  if (!raw) {
+    btn.disabled = true;
+    return;
+  }
+
+  const candidates = raw
+    .split(",")
+    .map((v) => v.trim())
+    .filter(Boolean)
+    .map((v) => v.toLowerCase());
+
+  if (!candidates.length) {
+    btn.disabled = true;
+    return;
+  }
+
+  const invalid = candidates.some((v) => !/^[a-zA-Z0-9_]+$/.test(v));
+  btn.disabled = invalid;
+  if (invalid) {
+    setPidAddHint("Use letters, numbers, and underscore. Separate multiple attributes with commas.");
+  }
+  if (!invalid && $("pidAddHint")?.textContent?.includes("Use letters")) {
+    setPidAddHint("");
+  }
+}
+
+function clearPidAddHint() {
+  const hint = $("pidAddHint");
+  if (!hint || hint.classList.contains("hidden")) return;
+  if (hint.textContent && (hint.textContent.startsWith("Added:") || hint.textContent.startsWith("Already selected:"))) {
+    setPidAddHint("");
+  }
 }
 
 function applyRequestEdits() {
@@ -383,13 +516,83 @@ function updateApplyEditsButtonState() {
   btn.classList.toggle("btn-ghost", !dirty);
 }
 
+function getCheckboxInputsByCred(cred) {
+  const selector = cred === "av" ? AV_ATTR_SELECTOR : PID_ATTR_SELECTOR;
+  return Array.from(document.querySelectorAll(selector));
+}
+
+function getSelectionCounts() {
+  const pidBoxes = getCheckboxInputsByCred("pid");
+  const avBoxes = getCheckboxInputsByCred("av");
+  return {
+    pidSelected: pidBoxes.filter((b) => b.checked).length,
+    pidTotal: pidBoxes.length,
+    avSelected: avBoxes.filter((b) => b.checked).length,
+    avTotal: avBoxes.length
+  };
+}
+
+function updateSelectionSummaries() {
+  const counts = getSelectionCounts();
+  const pidSummary = $("pidSelectedSummary");
+  const avSummary = $("avSelectedSummary");
+  if (pidSummary && UiLogic.summarizeSelection) {
+    pidSummary.textContent = UiLogic.summarizeSelection(counts.pidSelected, counts.pidTotal);
+  }
+  if (avSummary && UiLogic.summarizeSelection) {
+    avSummary.textContent = UiLogic.summarizeSelection(counts.avSelected, counts.avTotal);
+  }
+  return counts;
+}
+
+function updateCreateRequestState() {
+  const btn = $("createRequestBtn");
+  if (!btn) return;
+  const counts = getSelectionCounts();
+  const cred = getSelectedCred();
+  const valid = UiLogic.canCreateRequest
+    ? UiLogic.canCreateRequest({
+      cred,
+      pidSelectedCount: counts.pidSelected,
+      avSelectedCount: counts.avSelected
+    })
+    : (cred === "av" ? counts.avSelected > 0 : counts.pidSelected > 0);
+
+  btn.disabled = !valid;
+  if (cred === "pid") {
+    $("pidAttrHint")?.classList.toggle("hidden", valid);
+    if (!valid && $("pidAttrHint")) {
+      $("pidAttrHint").textContent = "Select at least one PID attribute to continue.";
+    }
+    $("avAttrHint")?.classList.add("hidden");
+  } else {
+    $("avAttrHint")?.classList.toggle("hidden", valid);
+    if (!valid && $("avAttrHint")) {
+      $("avAttrHint").textContent = "Select at least one age verification attribute to continue.";
+    }
+    $("pidAttrHint")?.classList.add("hidden");
+  }
+}
+
+function updateSelectionState() {
+  updateSelectionSummaries();
+  updateCreateRequestState();
+  updatePidAddInputState();
+}
+
 function parseTextareaJson() {
   const input = $("dcResponseInput");
   const text = input.value.trim();
   if (!text) throw new Error("dcResponse JSON is empty");
   try {
-    return JSON.parse(text);
+    const parsed = JSON.parse(text);
+    logWithContext("info", "Parsed response JSON", {
+      chars: text.length,
+      topLevelKeys: Object.keys(parsed || {}).slice(0, 10)
+    }, { payload: true });
+    return parsed;
   } catch (e) {
+    logWithContext("error", "Invalid response JSON", { message: e?.message || "Invalid JSON" }, { force: true });
     throw new Error("Invalid JSON in textarea");
   }
 }
@@ -401,6 +604,11 @@ async function postResponse(requestId, dcResponse) {
     body: JSON.stringify({ request_id: requestId, dcResponse })
   });
   const data = await res.json();
+  logWithContext("info", "POST /verifier/oid4vp/response completed", {
+    status: res.status,
+    ok: res.ok,
+    requestId
+  }, { payload: true });
   if (!res.ok) {
     const message = data?.error || "Request failed";
     throw new Error(message);
@@ -415,6 +623,11 @@ async function postIsoResponse(requestId, dcResponse) {
     body: JSON.stringify({ request_id: requestId, dcResponse })
   });
   const data = await res.json();
+  logWithContext("info", "POST /verifier/iso-mdoc/response completed", {
+    status: res.status,
+    ok: res.ok,
+    requestId
+  }, { payload: true });
   if (!res.ok) {
     const message = data?.error || "Request failed";
     throw new Error(message);
@@ -445,26 +658,6 @@ function formatValue(v) {
   }
   return String(v);
 }
-
-const FIELD_MAP = {
-  pid: {
-    given_name: { label: "Given name", order: 1 },
-    family_name: { label: "Family name", order: 2 },
-    birth_date: { label: "Birth date", order: 3 },
-    birth_place: { label: "Birth place", order: 4 },
-    nationality: { label: "Nationality", order: 5 },
-    issuing_authority: { label: "Issuing authority", order: 6 },
-    issuing_country: { label: "Issuing country", order: 7 },
-    expiry_date: { label: "Expiry date", order: 8 },
-    portrait: { label: "Portrait", order: 9 }
-  },
-  av: {
-    age_over_18: { label: "Age over 18", order: 1 },
-    age_over_21: { label: "Age over 21", order: 2 },
-    issuing_country: { label: "Issuing country", order: 3 },
-    expiry_date: { label: "Expiry date", order: 4 }
-  }
-};
 
 function normalizeValue(v) {
   if (v === null || v === undefined) return { text: "—" };
@@ -799,7 +992,6 @@ function renderResults(data) {
 
   // Certificate
   const cert = extracted.issuerCertificate || {};
-  console.log("[cert] renderer input:", JSON.parse(JSON.stringify(cert)));
   const certSummary = $("certSummary");
   certSummary.innerHTML = `
     <div class="kv-label">subjectCN</div><div class="kv-value mono">${cert.subjectCN || "—"}</div>
@@ -862,22 +1054,22 @@ function mapIsoErrorMessage(err) {
 }
 
 function getSelectedPidAttrs() {
-  const boxes = Array.from(document.querySelectorAll("#pidAttrsSection input[type=checkbox][data-attr]"));
+  const boxes = Array.from(document.querySelectorAll(PID_ATTR_SELECTOR));
   return boxes.filter((b) => b.checked).map((b) => b.dataset.attr);
 }
 
 function getSelectedAvAttrs() {
-  const boxes = Array.from(document.querySelectorAll("#avAttrsSection input[type=checkbox][data-av-attr]"));
+  const boxes = Array.from(document.querySelectorAll(AV_ATTR_SELECTOR));
   return boxes.filter((b) => b.checked).map((b) => b.dataset.avAttr);
 }
 
 function setPidAttrChecks(checked) {
-  const boxes = Array.from(document.querySelectorAll("#pidAttrsSection input[type=checkbox][data-attr]"));
+  const boxes = Array.from(document.querySelectorAll(PID_ATTR_SELECTOR));
   boxes.forEach((b) => { b.checked = checked; });
 }
 
 function setAvAttrChecks(checked) {
-  const boxes = Array.from(document.querySelectorAll("#avAttrsSection input[type=checkbox][data-av-attr]"));
+  const boxes = Array.from(document.querySelectorAll(AV_ATTR_SELECTOR));
   boxes.forEach((b) => { b.checked = checked; });
 }
 
@@ -889,12 +1081,6 @@ function updatePidAttrUI() {
   const avSection = $("avAttrsSection");
   if (pidSection) pidSection.classList.toggle("hidden", !isPid);
   if (avSection) avSection.classList.toggle("hidden", !isAv);
-  if ($("pidAttrHint")) {
-    $("pidAttrHint").classList.add("hidden");
-  }
-  if ($("avAttrHint")) {
-    $("avAttrHint").classList.add("hidden");
-  }
   if (!isPid) setPidAddHint("");
   if (isPid && getSelectedProtocol() === "oid4vp" && state.generatedRequest && !state.editedRequest) {
     syncRequestClaimsFromPidCheckboxes();
@@ -902,43 +1088,36 @@ function updatePidAttrUI() {
   if (isAv && getSelectedProtocol() === "oid4vp" && state.generatedRequest && !state.editedRequest) {
     syncRequestClaimsFromAvCheckboxes();
   }
+  updateSelectionState();
   updateProtocolUI();
 }
 
 function syncRequestClaimsFromPidCheckboxes() {
   const attrs = getSelectedPidAttrs();
-  if (!attrs.length) return;
   const req = state.generatedRequest;
   if (!req) return;
-  const target = req.request?.data?.dcql_query || req.dcql_query;
-  if (!target) return;
-  if (!Array.isArray(target.credentials)) target.credentials = [];
-  let cred = target.credentials.find((c) => c?.meta?.doctype_value === "eu.europa.ec.eudi.pid.1");
-  if (!cred) {
-    cred = { id: "pid1", format: "mso_mdoc", meta: { doctype_value: "eu.europa.ec.eudi.pid.1" }, claims: [] };
-    target.credentials.unshift(cred);
+  if (UiLogic.upsertCredentialClaims) {
+    UiLogic.upsertCredentialClaims(req, {
+      docType: "eu.europa.ec.eudi.pid.1",
+      credId: "pid1",
+      attrs
+    });
   }
-  cred.id = "pid1";
-  cred.claims = attrs.map((a) => ({ path: ["eu.europa.ec.eudi.pid.1", a] }));
   setRequestEditor(JSON.stringify(req, null, 2));
   
 }
 
 function syncRequestClaimsFromAvCheckboxes() {
   const attrs = getSelectedAvAttrs();
-  if (!attrs.length) return;
   const req = state.generatedRequest;
   if (!req) return;
-  const target = req.request?.data?.dcql_query || req.dcql_query;
-  if (!target) return;
-  if (!Array.isArray(target.credentials)) target.credentials = [];
-  let cred = target.credentials.find((c) => c?.meta?.doctype_value === "eu.europa.ec.av.1");
-  if (!cred) {
-    cred = { id: "av1", format: "mso_mdoc", meta: { doctype_value: "eu.europa.ec.av.1" }, claims: [] };
-    target.credentials.unshift(cred);
+  if (UiLogic.upsertCredentialClaims) {
+    UiLogic.upsertCredentialClaims(req, {
+      docType: "eu.europa.ec.av.1",
+      credId: "av1",
+      attrs
+    });
   }
-  cred.id = "av1";
-  cred.claims = attrs.map((a) => ({ path: ["eu.europa.ec.av.1", a] }));
   setRequestEditor(JSON.stringify(req, null, 2));
   
 }
@@ -950,6 +1129,12 @@ async function handleCreateRequest() {
   let protocol = "oid4vp";
   try {
     const cred = getSelectedCred();
+    const selectedPidAttrsBefore = getSelectedPidAttrs();
+    const selectedAvAttrsBefore = getSelectedAvAttrs();
+    updateCreateRequestState();
+    if ($("createRequestBtn")?.disabled) {
+      throw new Error("Select at least one attribute before creating a request.");
+    }
     protocol = getSelectedProtocol();
     state.protocol = protocol;
     let url = `/verifier/oid4vp/request?cred=${encodeURIComponent(cred)}`;
@@ -974,14 +1159,47 @@ async function handleCreateRequest() {
     }
     addLog("info", `Selected cred: ${cred}`);
     addLog("info", `GET ${url}`);
+    logWithContext("info", "Creating request", {
+      cred,
+      protocol,
+      selectedPidAttrsBefore,
+      selectedAvAttrsBefore
+    }, { payload: true });
     const res = await fetch(url);
     const data = await res.json();
     renderRequest(data);
+    if (protocol === "oid4vp" && cred === "pid") {
+      setPidAttrChecks(false);
+      selectedPidAttrsBefore.forEach((attr) => {
+        const box = ensurePidCheckbox(attr);
+        if (box) box.checked = true;
+      });
+      syncRequestClaimsFromPidCheckboxes();
+      updateSelectionState();
+      updateApplyEditsButtonState();
+    }
+    if (protocol === "oid4vp" && cred === "av") {
+      setAvAttrChecks(false);
+      selectedAvAttrsBefore.forEach((attr) => {
+        const box = document.querySelector(`#avAttrsSection input[type=checkbox][data-av-attr="${attr}"]`);
+        if (box) box.checked = true;
+      });
+      syncRequestClaimsFromAvCheckboxes();
+      updateSelectionState();
+      updateApplyEditsButtonState();
+    }
     state.requestCred = cred;
     addLog("info", `Request created (${cred})`);
+    logWithContext("info", "Request creation complete", {
+      requestId: data?.request_id,
+      protocol
+    }, { payload: true });
     return data;
   } catch (e) {
-    addLog("error", e.message);
+    logWithContext("error", "Create request failed", {
+      message: e?.message || "unknown",
+      name: e?.name || "Error"
+    }, { force: true });
     setStepState(1, "error");
     return null;
   } finally {
@@ -997,6 +1215,7 @@ async function handleInvokeDcApi() {
   try {
     const cred = getSelectedCred();
     protocol = getSelectedProtocol();
+    logWithContext("info", "Invoking wallet", { protocol, cred }, { payload: true });
     if (!state.request?.request_id) {
       throw new Error("Create a request first.");
     }
@@ -1027,6 +1246,9 @@ async function handleInvokeDcApi() {
       if (!isoResponse) throw new Error("No response from wallet");
       $("dcResponseInput").value = JSON.stringify(isoResponse, null, 2);
       addLog("info", "ISO presentation response received");
+      logWithContext("info", "Wallet ISO response received", {
+        topLevelKeys: Object.keys(isoResponse || {}).slice(0, 10)
+      }, { payload: true });
       setStepState(2, "success");
       setStepState(3, "success");
       setStepState(4, "pending");
@@ -1050,6 +1272,9 @@ async function handleInvokeDcApi() {
     if (!dcResponse) throw new Error("No response from DC API");
     $("dcResponseInput").value = JSON.stringify(dcResponse, null, 2);
     addLog("info", "DC API response received");
+    logWithContext("info", "Wallet OID4VP response received", {
+      topLevelKeys: Object.keys(dcResponse || {}).slice(0, 10)
+    }, { payload: true });
     setStepState(2, "success");
     setStepState(3, "success");
     setStepState(4, "pending");
@@ -1058,7 +1283,10 @@ async function handleInvokeDcApi() {
     const message = friendly || e.message;
     $("errorBanner").textContent = message;
     $("errorBanner").classList.remove("hidden");
-    addLog("error", message);
+    logWithContext("error", message, {
+      name: e?.name || "Error",
+      stack: e?.stack ? String(e.stack).split("\n").slice(0, 2).join(" | ") : undefined
+    }, { force: true });
     setStepState(2, "error");
   } finally {
     setLoading(btn, false);
@@ -1085,6 +1313,7 @@ async function handleSubmitResponse() {
     const dcResponse = parseTextareaJson();
     const cred = getSelectedCred();
     protocol = getSelectedProtocol();
+    logWithContext("info", "Submitting wallet response", { protocol, requestId }, { payload: true });
     setStepState(3, "success");
     setStepState(4, "active");
     
@@ -1093,6 +1322,10 @@ async function handleSubmitResponse() {
       : await postResponse(requestId, dcResponse);
     renderResults(data);
     addLog("info", "Response verified");
+    logWithContext("info", "Verification response processed", {
+      ok: data?.ok,
+      docType: data?.extracted?.docType
+    }, { payload: true });
   } catch (e) {
     input.classList.add("error");
     setStatus("bad", "FAIL");
@@ -1105,7 +1338,10 @@ async function handleSubmitResponse() {
     const message = friendly || e.message;
     $("errorBanner").textContent = message;
     $("errorBanner").classList.remove("hidden");
-    addLog("error", message);
+    logWithContext("error", message, {
+      name: e?.name || "Error",
+      stack: e?.stack ? String(e.stack).split("\n").slice(0, 2).join(" | ") : undefined
+    }, { force: true });
   } finally {
     setLoading(btn, false);
   }
@@ -1119,8 +1355,11 @@ function resetUI() {
   const step5 = document.querySelector('.step[data-step="5"]');
   if (step5) step5.classList.add("hidden");
   $("errorBanner").classList.add("hidden");
+  if ($("pidAddInput")) $("pidAddInput").value = "";
+  setPidAddHint("");
   setStatus("neutral", "Idle");
   resetStepStates();
+  updateSelectionState();
   addLog("info", "UI reset");
 }
 
@@ -1169,32 +1408,42 @@ document.querySelectorAll("input[name=protocol]").forEach((el) => {
     updateProtocolUI();
   });
 });
-document.querySelectorAll("#pidAttrsSection input[type=checkbox][data-attr]").forEach((el) => {
+document.querySelectorAll(PID_ATTR_SELECTOR).forEach((el) => {
+  el.addEventListener("change", updateSelectionState);
   el.addEventListener("change", updatePidAttrUI);
 });
-document.querySelectorAll("#avAttrsSection input[type=checkbox][data-av-attr]").forEach((el) => {
+document.querySelectorAll(AV_ATTR_SELECTOR).forEach((el) => {
+  el.addEventListener("change", updateSelectionState);
   el.addEventListener("change", updatePidAttrUI);
 });
 $("pidSelectAllBtn")?.addEventListener("click", () => {
   setPidAttrChecks(true);
+  updateSelectionState();
   updatePidAttrUI();
 });
 $("pidSelectNoneBtn")?.addEventListener("click", () => {
   setPidAttrChecks(false);
+  updateSelectionState();
   updatePidAttrUI();
 });
 $("avSelectAllBtn")?.addEventListener("click", () => {
   setAvAttrChecks(true);
+  updateSelectionState();
   updatePidAttrUI();
 });
 $("avSelectNoneBtn")?.addEventListener("click", () => {
   setAvAttrChecks(false);
+  updateSelectionState();
   updatePidAttrUI();
 });
 if ($("pidAddBtn")) {
   $("pidAddBtn").addEventListener("click", addPidAttributeFromInput);
 }
 if ($("pidAddInput")) {
+  $("pidAddInput").addEventListener("input", () => {
+    updatePidAddInputState();
+    clearPidAddHint();
+  });
   $("pidAddInput").addEventListener("keydown", (e) => {
     if (e.key === "Enter") {
       e.preventDefault();
@@ -1220,6 +1469,15 @@ $("dcResponseInput").addEventListener("input", (e) => {
 
 setStatus("neutral", "Idle");
 setProtocolSelection(loadProtocol());
+loadDebugOptions();
+wireDebugOptionControls();
 updatePidAttrUI();
+updateSelectionState();
+updatePidAddInputState();
 resetStepStates();
+wireGlobalErrorLogging();
 connectServerLogs();
+logWithContext("info", "UI initialized", {
+  protocol: getSelectedProtocol(),
+  debug: state.debug
+}, { force: true });
